@@ -2,15 +2,28 @@ namespace Viewer;
 
 public sealed class ImageViewerForm : Form
 {
+    private static bool lastFitToWindow = AppSettings.Current.ViewerFitToWindow;
+    private static bool lastFullscreen = AppSettings.Current.ViewerFullscreen;
+    private static FormWindowState lastWindowState = AppSettings.Current.ViewerWindow.WindowState;
+    private static Rectangle lastWindowBounds = AppSettings.Current.ViewerWindow.Bounds;
+    private static bool hasLastWindowBounds = AppSettings.Current.ViewerWindow.HasBounds;
+
     private readonly List<ImageItem> images;
     private readonly PictureBox pictureBox = new();
     private readonly Label statusLabel = new();
     private readonly Button previousButton = new();
     private readonly Button nextButton = new();
+    private readonly Button firstFolderButton = new();
+    private readonly Button previousFolderButton = new();
+    private readonly Button nextFolderButton = new();
+    private readonly Button lastFolderButton = new();
     private readonly Button fullscreenButton = new();
     private readonly TextBox pageBox = new();
     private readonly Label pageTotalLabel = new();
     private readonly CheckBox fitCheckBox = new();
+    private readonly List<Button> toolbarButtons = [];
+    private readonly bool enableFolderNavigation;
+    private readonly List<long> folderOrder;
     private int index;
     private Image? currentImage;
     private bool isFullscreen;
@@ -20,9 +33,14 @@ public sealed class ImageViewerForm : Form
 
     public string? CurrentImagePath => images.Count == 0 ? null : images[index].Path;
 
-    public ImageViewerForm(List<ImageItem> imageItems, int startIndex = 0)
+    public ImageViewerForm(List<ImageItem> imageItems, int startIndex = 0, bool enableFolderNavigation = false)
     {
         images = imageItems;
+        this.enableFolderNavigation = enableFolderNavigation;
+        folderOrder = imageItems
+            .Select(image => image.FolderId)
+            .Distinct()
+            .ToList();
         index = Math.Clamp(startIndex, 0, Math.Max(0, imageItems.Count - 1));
 
         Text = "이미지 뷰어";
@@ -30,6 +48,12 @@ public sealed class ImageViewerForm : Form
         Height = 800;
         KeyPreview = true;
         BackColor = Color.FromArgb(30, 30, 30);
+        if (hasLastWindowBounds)
+        {
+            StartPosition = FormStartPosition.Manual;
+            Bounds = lastWindowBounds;
+        }
+
         previousBorderStyle = FormBorderStyle;
         previousWindowState = WindowState;
         previousBounds = Bounds;
@@ -45,12 +69,36 @@ public sealed class ImageViewerForm : Form
         previousButton.Text = "이전";
         previousButton.Width = 78;
         previousButton.Click += (_, _) => MoveImage(-1);
-        StyleToolbarButton(previousButton);
+        StyleToolbarButtonInstance(previousButton);
 
         nextButton.Text = "다음";
         nextButton.Width = 78;
         nextButton.Click += (_, _) => MoveImage(1);
-        StyleToolbarButton(nextButton);
+        StyleToolbarButtonInstance(nextButton);
+
+        firstFolderButton.Text = "첫 편";
+        firstFolderButton.Width = 70;
+        firstFolderButton.Click += (_, _) => MoveToFolderEdge(first: true);
+        firstFolderButton.Visible = enableFolderNavigation;
+        StyleToolbarButtonInstance(firstFolderButton);
+
+        previousFolderButton.Text = "이전 편";
+        previousFolderButton.Width = 82;
+        previousFolderButton.Click += (_, _) => MoveFolder(-1);
+        previousFolderButton.Visible = enableFolderNavigation;
+        StyleToolbarButtonInstance(previousFolderButton);
+
+        nextFolderButton.Text = "다음 편";
+        nextFolderButton.Width = 82;
+        nextFolderButton.Click += (_, _) => MoveFolder(1);
+        nextFolderButton.Visible = enableFolderNavigation;
+        StyleToolbarButtonInstance(nextFolderButton);
+
+        lastFolderButton.Text = "마지막 편";
+        lastFolderButton.Width = 88;
+        lastFolderButton.Click += (_, _) => MoveToFolderEdge(first: false);
+        lastFolderButton.Visible = enableFolderNavigation;
+        StyleToolbarButtonInstance(lastFolderButton);
 
         var pageTitleLabel = new Label
         {
@@ -97,19 +145,25 @@ public sealed class ImageViewerForm : Form
         fullscreenButton.Text = "전체화면";
         fullscreenButton.Width = 90;
         fullscreenButton.Click += (_, _) => ToggleFullscreen();
-        StyleToolbarButton(fullscreenButton);
+        StyleToolbarButtonInstance(fullscreenButton);
 
         fitCheckBox.Text = "맞춤 보기";
-        fitCheckBox.Checked = true;
+        fitCheckBox.Checked = lastFitToWindow;
         fitCheckBox.AutoSize = true;
         fitCheckBox.ForeColor = Color.White;
-        fitCheckBox.CheckedChanged += (_, _) => ApplySizeMode();
+        fitCheckBox.CheckedChanged += (_, _) =>
+        {
+            lastFitToWindow = fitCheckBox.Checked;
+            AppSettings.Current.ViewerFitToWindow = lastFitToWindow;
+            AppSettings.Save();
+            ApplySizeMode();
+        };
 
         statusLabel.AutoSize = true;
         statusLabel.ForeColor = Color.White;
         statusLabel.Padding = new Padding(14, 7, 0, 0);
 
-        toolbar.Controls.AddRange([previousButton, nextButton, pageTitleLabel, pageBox, pageLabel, pageTotalLabel, fullscreenButton, fitCheckBox, statusLabel]);
+        toolbar.Controls.AddRange([previousButton, nextButton, firstFolderButton, previousFolderButton, nextFolderButton, lastFolderButton, pageTitleLabel, pageBox, pageLabel, pageTotalLabel, fullscreenButton, fitCheckBox, statusLabel]);
 
         pictureBox.Dock = DockStyle.Fill;
         pictureBox.BackColor = Color.FromArgb(20, 20, 20);
@@ -121,7 +175,20 @@ public sealed class ImageViewerForm : Form
 
         KeyDown += OnKeyDown;
         MouseWheel += (_, mouseEventArgs) => MoveImage(mouseEventArgs.Delta < 0 ? 1 : -1);
+        FormClosing += (_, _) => SaveWindowPlacement();
         FormClosed += (_, _) => currentImage?.Dispose();
+        Shown += (_, _) =>
+        {
+            if (lastFullscreen && !isFullscreen)
+            {
+                ToggleFullscreen();
+            }
+            else if (lastWindowState == FormWindowState.Maximized)
+            {
+                WindowState = FormWindowState.Maximized;
+            }
+        };
+        ApplySizeMode();
         LoadCurrentImage();
     }
 
@@ -145,6 +212,16 @@ public sealed class ImageViewerForm : Form
         else if (keyEventArgs.KeyCode == Keys.F11)
         {
             ToggleFullscreen();
+            keyEventArgs.Handled = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.Up && enableFolderNavigation)
+        {
+            MoveFolder(-1);
+            keyEventArgs.Handled = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.Down && enableFolderNavigation)
+        {
+            MoveFolder(1);
             keyEventArgs.Handled = true;
         }
         else if (keyEventArgs.KeyCode == Keys.Escape)
@@ -193,6 +270,30 @@ public sealed class ImageViewerForm : Form
             return true;
         }
 
+        if (enableFolderNavigation && keyData == Keys.Up)
+        {
+            MoveFolder(-1);
+            return true;
+        }
+
+        if (enableFolderNavigation && keyData == Keys.Down)
+        {
+            MoveFolder(1);
+            return true;
+        }
+
+        if (enableFolderNavigation && keyData == Keys.Home)
+        {
+            MoveToFolderEdge(first: true);
+            return true;
+        }
+
+        if (enableFolderNavigation && keyData == Keys.End)
+        {
+            MoveToFolderEdge(first: false);
+            return true;
+        }
+
         return base.ProcessCmdKey(ref message, keyData);
     }
 
@@ -204,6 +305,59 @@ public sealed class ImageViewerForm : Form
         }
 
         index = Math.Clamp(index + delta, 0, images.Count - 1);
+        LoadCurrentImage();
+    }
+
+    private void MoveFolder(int delta)
+    {
+        if (!enableFolderNavigation || images.Count == 0)
+        {
+            return;
+        }
+
+        var currentFolderId = images[index].FolderId;
+        if (delta < 0)
+        {
+            for (var imageIndex = index - 1; imageIndex >= 0; imageIndex--)
+            {
+                if (images[imageIndex].FolderId != currentFolderId)
+                {
+                    var targetFolderId = images[imageIndex].FolderId;
+                    index = images.FindIndex(image => image.FolderId == targetFolderId);
+                    LoadCurrentImage();
+                    return;
+                }
+            }
+
+            return;
+        }
+
+        for (var imageIndex = index + 1; imageIndex < images.Count; imageIndex++)
+        {
+            if (images[imageIndex].FolderId != currentFolderId)
+            {
+                index = imageIndex;
+                LoadCurrentImage();
+                return;
+            }
+        }
+    }
+
+    private void MoveToFolderEdge(bool first)
+    {
+        if (!enableFolderNavigation || images.Count == 0)
+        {
+            return;
+        }
+
+        var folderId = first ? folderOrder.FirstOrDefault() : folderOrder.LastOrDefault();
+        var targetIndex = images.FindIndex(image => image.FolderId == folderId);
+        if (targetIndex < 0)
+        {
+            return;
+        }
+
+        index = targetIndex;
         LoadCurrentImage();
     }
 
@@ -225,7 +379,8 @@ public sealed class ImageViewerForm : Form
             using var stream = new FileStream(image.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             currentImage = Image.FromStream(stream);
             pictureBox.Image = currentImage;
-            statusLabel.Text = $"{image.FileName}  {currentImage.Width}x{currentImage.Height}";
+            var folderPositionText = GetFolderPositionText(image);
+            statusLabel.Text = $"{folderPositionText}{image.FileName}  {currentImage.Width}x{currentImage.Height}";
         }
         catch (Exception exception)
         {
@@ -234,8 +389,46 @@ public sealed class ImageViewerForm : Form
 
         previousButton.Enabled = index > 0;
         nextButton.Enabled = index < images.Count - 1;
+        firstFolderButton.Enabled = enableFolderNavigation && folderOrder.Count > 1 && images[index].FolderId != folderOrder.First();
+        previousFolderButton.Enabled = enableFolderNavigation && HasAdjacentFolder(-1);
+        nextFolderButton.Enabled = enableFolderNavigation && HasAdjacentFolder(1);
+        lastFolderButton.Enabled = enableFolderNavigation && folderOrder.Count > 1 && images[index].FolderId != folderOrder.Last();
+        UpdateToolbarButtonStyles();
         pageTotalLabel.Text = Math.Max(1, images.Count).ToString();
         pageBox.Text = (index + 1).ToString();
+    }
+
+    private bool HasAdjacentFolder(int delta)
+    {
+        if (images.Count == 0)
+        {
+            return false;
+        }
+
+        var currentFolderId = images[index].FolderId;
+        if (delta < 0)
+        {
+            return images.Take(index).Any(image => image.FolderId != currentFolderId);
+        }
+
+        return images.Skip(index + 1).Any(image => image.FolderId != currentFolderId);
+    }
+
+    private string GetFolderPositionText(ImageItem image)
+    {
+        if (!enableFolderNavigation || folderOrder.Count <= 1)
+        {
+            return "";
+        }
+
+        var folderIndex = folderOrder.IndexOf(image.FolderId);
+        if (folderIndex < 0)
+        {
+            return "";
+        }
+
+        var title = string.IsNullOrWhiteSpace(image.FolderDisplayName) ? "" : $"{image.FolderDisplayName}  ";
+        return $"{folderIndex + 1}/{folderOrder.Count}편  {title}";
     }
 
     private void ApplySizeMode()
@@ -273,6 +466,10 @@ public sealed class ImageViewerForm : Form
             TopMost = true;
             fullscreenButton.Text = "창모드";
             isFullscreen = true;
+            lastFullscreen = true;
+            AppSettings.Current.ViewerFullscreen = true;
+            AppSettings.Save();
+            UpdateToolbarButtonStyles();
             return;
         }
 
@@ -286,6 +483,34 @@ public sealed class ImageViewerForm : Form
 
         fullscreenButton.Text = "전체화면";
         isFullscreen = false;
+        lastFullscreen = false;
+        AppSettings.Current.ViewerFullscreen = false;
+        AppSettings.Save();
+        UpdateToolbarButtonStyles();
+    }
+
+    private void SaveWindowPlacement()
+    {
+        if (isFullscreen)
+        {
+            AppSettings.Current.ViewerFullscreen = true;
+            AppSettings.Save();
+            return;
+        }
+
+        lastWindowState = WindowState == FormWindowState.Minimized ? FormWindowState.Normal : WindowState;
+        if (WindowState == FormWindowState.Normal)
+        {
+            lastWindowBounds = Bounds;
+            hasLastWindowBounds = true;
+        }
+
+        var placement = AppSettings.Current.ViewerWindow;
+        placement.WindowState = lastWindowState;
+        placement.Bounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+        AppSettings.Current.ViewerFullscreen = false;
+        AppSettings.Current.ViewerFitToWindow = lastFitToWindow;
+        AppSettings.Save();
     }
 
     private static void StyleToolbarButton(Button button)
@@ -294,5 +519,35 @@ public sealed class ImageViewerForm : Form
         button.ForeColor = Color.Black;
         button.Height = 28;
         button.Margin = new Padding(3, 2, 6, 2);
+    }
+
+    private void StyleToolbarButtonInstance(Button button)
+    {
+        toolbarButtons.Add(button);
+        StyleToolbarButton(button);
+        button.EnabledChanged += (_, _) => UpdateToolbarButtonStyle(button);
+        UpdateToolbarButtonStyle(button);
+    }
+
+    private void UpdateToolbarButtonStyles()
+    {
+        foreach (var button in toolbarButtons)
+        {
+            UpdateToolbarButtonStyle(button);
+        }
+    }
+
+    private static void UpdateToolbarButtonStyle(Button button)
+    {
+        button.UseVisualStyleBackColor = false;
+        if (button.Enabled)
+        {
+            button.BackColor = Color.FromArgb(245, 245, 245);
+            button.ForeColor = Color.Black;
+            return;
+        }
+
+        button.BackColor = Color.FromArgb(80, 80, 80);
+        button.ForeColor = Color.FromArgb(170, 170, 170);
     }
 }

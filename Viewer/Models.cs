@@ -7,13 +7,18 @@ public sealed class FolderItem
     public string DisplayName { get; set; } = "";
     public string? Author { get; set; }
     public string? Number { get; set; }
+    public string? SeriesName { get; set; }
+    public int? SeriesOrder { get; set; }
     public int Score { get; set; }
     public string? Memo { get; set; }
     public bool IsFavorite { get; set; }
+    public bool IsReserved { get; set; }
     public int ViewCount { get; set; }
     public DateTime? LastViewedAt { get; set; }
     public string? LastImagePath { get; set; }
     public DateTime? FolderModifiedAt { get; set; }
+    public int ImageCount { get; set; }
+    public long TotalImageBytes { get; set; }
     public string? ThumbnailPath { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
@@ -31,6 +36,16 @@ public sealed class ImageItem
     public long FileSize { get; set; }
     public DateTime ModifiedAt { get; set; }
     public int SortOrder { get; set; }
+    public string? FolderDisplayName { get; set; }
+    public int? FolderSeriesOrder { get; set; }
+}
+
+public sealed class DuplicateImageCandidate
+{
+    public string FileName { get; set; } = "";
+    public long FileSize { get; set; }
+    public string Hash { get; set; } = "";
+    public string Path { get; set; } = "";
 }
 
 public sealed class FolderScanResult
@@ -77,6 +92,14 @@ public sealed class CleanupSummary
     public int RemovedImages { get; set; }
 }
 
+public sealed class SeriesQualityIssue
+{
+    public string SeriesName { get; set; } = "";
+    public string IssueType { get; set; } = "";
+    public string Detail { get; set; } = "";
+    public string FolderNames { get; set; } = "";
+}
+
 public sealed class ScanLog
 {
     private readonly List<string> entries = [];
@@ -93,7 +116,9 @@ public enum FolderListMode
 {
     All,
     Favorites,
-    Recent
+    Recent,
+    Reserved,
+    Series
 }
 
 public enum FolderSortMode
@@ -102,7 +127,9 @@ public enum FolderSortMode
     Name,
     Author,
     Score,
-    Recent
+    Recent,
+    Series,
+    ImageCount
 }
 
 public enum FolderSearchField
@@ -110,11 +137,23 @@ public enum FolderSearchField
     Name,
     Author,
     Memo,
-    Path
+    Path,
+    Series
 }
 
 public enum TagFilterMode
 {
     And,
     Or
+}
+
+public enum QuickFilterMode
+{
+    All,
+    Unviewed,
+    NoScore,
+    NoTags,
+    NoSeries,
+    NoThumbnail,
+    BrokenPath
 }
