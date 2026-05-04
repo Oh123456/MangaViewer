@@ -4,6 +4,7 @@ namespace Viewer;
 
 public sealed class AppSettings
 {
+    public const string DefaultUpdateReleaseApiUrl = "https://api.github.com/repos/Oh123456/MangaViewer/releases/latest";
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
     private static AppSettings? current;
 
@@ -15,6 +16,8 @@ public sealed class AppSettings
     public bool AutoRefreshPathStatusAfterScan { get; set; }
     public int PartialDuplicateThresholdPercent { get; set; } = 80;
     public string LanguageCode { get; set; } = "kr";
+    public bool AutoCheckForUpdates { get; set; } = true;
+    public string UpdateReleaseApiUrl { get; set; } = DefaultUpdateReleaseApiUrl;
 
     public static AppSettings Current => current ??= Load();
 
@@ -37,15 +40,25 @@ public sealed class AppSettings
         {
             if (!File.Exists(SettingsPath))
             {
-                return new AppSettings();
+                return Normalize(new AppSettings());
             }
 
-            return JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings();
+            return Normalize(JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(SettingsPath)) ?? new AppSettings());
         }
         catch
         {
-            return new AppSettings();
+            return Normalize(new AppSettings());
         }
+    }
+
+    private static AppSettings Normalize(AppSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.UpdateReleaseApiUrl))
+        {
+            settings.UpdateReleaseApiUrl = DefaultUpdateReleaseApiUrl;
+        }
+
+        return settings;
     }
 }
 

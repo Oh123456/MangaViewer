@@ -25,6 +25,9 @@ public sealed class SettingsForm : Form
     private readonly CheckBox autoRefreshPathStatusCheckBox = new();
     private readonly NumericUpDown partialDuplicateThresholdBox = new();
     private readonly ComboBox languageComboBox = new();
+    private readonly CheckBox autoCheckForUpdatesCheckBox = new();
+    private readonly TextBox updateReleaseApiUrlBox = new();
+    private readonly Button checkUpdatesButton = new();
     private readonly Button renameTagButton = new();
     private readonly Button deleteTagButton = new();
     private CancellationTokenSource? duplicateExportCancellationTokenSource;
@@ -57,6 +60,7 @@ public sealed class SettingsForm : Form
         var rootsPage = new TabPage("루트");
         var filePage = new TabPage("파일");
         var maintenancePage = new TabPage("유지관리");
+        var updatePage = new TabPage("업데이트");
         var tagsPage = new TabPage("태그");
 
         addRootButton.Text = "메인 루트 추가";
@@ -179,6 +183,59 @@ public sealed class SettingsForm : Form
         }, 0, 2);
         maintenancePage.Controls.Add(maintenanceLayout);
 
+        autoCheckForUpdatesCheckBox.Text = "시작 시 업데이트 확인";
+        autoCheckForUpdatesCheckBox.AutoSize = true;
+        autoCheckForUpdatesCheckBox.Checked = AppSettings.Current.AutoCheckForUpdates;
+        autoCheckForUpdatesCheckBox.CheckedChanged += (_, _) =>
+        {
+            AppSettings.Current.AutoCheckForUpdates = autoCheckForUpdatesCheckBox.Checked;
+            AppSettings.Save();
+        };
+
+        updateReleaseApiUrlBox.Text = AppSettings.Current.UpdateReleaseApiUrl;
+        updateReleaseApiUrlBox.Dock = DockStyle.Fill;
+        updateReleaseApiUrlBox.PlaceholderText = "https://api.github.com/repos/OWNER/REPO/releases/latest";
+        updateReleaseApiUrlBox.Leave += (_, _) => SaveUpdateReleaseApiUrl();
+
+        checkUpdatesButton.Text = "업데이트 확인";
+        checkUpdatesButton.Width = 120;
+        checkUpdatesButton.Height = 30;
+        checkUpdatesButton.Click += async (_, _) =>
+        {
+            SaveUpdateReleaseApiUrl();
+            await CheckForUpdatesAsync(showNoUpdateMessage: true);
+        };
+
+        var updateLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 5,
+            ColumnCount = 1
+        };
+        updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        updateLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        updateLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        updateLayout.Controls.Add(autoCheckForUpdatesCheckBox, 0, 0);
+        updateLayout.Controls.Add(new Label
+        {
+            Text = "GitHub Releases API URL",
+            Dock = DockStyle.Fill,
+            Font = new Font(Font, FontStyle.Bold),
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 1);
+        updateLayout.Controls.Add(updateReleaseApiUrlBox, 0, 2);
+        updateLayout.Controls.Add(CreateButtonPanel(checkUpdatesButton), 0, 3);
+        updateLayout.Controls.Add(new Label
+        {
+            Text = "예: https://api.github.com/repos/OWNER/REPO/releases/latest",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft
+        }, 0, 4);
+        updatePage.Controls.Add(updateLayout);
+
         var tagLabel = new Label
         {
             Text = "태그 관리",
@@ -244,7 +301,7 @@ public sealed class SettingsForm : Form
         tagLabel.MouseDown += (_, _) => ClearListSelections();
         tagButtons.MouseDown += (_, _) => ClearListSelections();
 
-        tabs.TabPages.AddRange([rootsPage, filePage, maintenancePage, tagsPage]);
+        tabs.TabPages.AddRange([rootsPage, filePage, maintenancePage, updatePage, tagsPage]);
         Controls.Add(tabs);
     }
 
@@ -334,6 +391,62 @@ public sealed class SettingsForm : Form
     {
         Localization.ApplyTo(this);
         Text = Localization.T("settings.title");
+    }
+
+    private void SaveUpdateReleaseApiUrl()
+    {
+        var releaseApiUrl = updateReleaseApiUrlBox.Text.Trim();
+        if (string.Equals(AppSettings.Current.UpdateReleaseApiUrl, releaseApiUrl, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        AppSettings.Current.UpdateReleaseApiUrl = releaseApiUrl;
+        AppSettings.Save();
+    }
+
+    private async Task CheckForUpdatesAsync(bool showNoUpdateMessage)
+    {
+        checkUpdatesButton.Enabled = false;
+        try
+        {
+            var result = await UpdateService.CheckLatestAsync();
+            if (!result.IsConfigured)
+            {
+                MessageBox.Show(this, result.ErrorMessage, Localization.T("업데이트 확인"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
+            {
+                MessageBox.Show(this, result.ErrorMessage, Localization.T("업데이트 확인 실패"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            if (!result.HasUpdate)
+            {
+                if (showNoUpdateMessage)
+                {
+                    MessageBox.Show(this, string.Format(Localization.T("현재 최신 버전입니다.\n\n현재 버전: {0}"), result.CurrentVersion), Localization.T("업데이트 확인"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+
+                return;
+            }
+
+            var message = string.Format(
+                Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?"),
+                result.CurrentVersion,
+                result.LatestVersion);
+            var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (dialogResult == DialogResult.Yes && !string.IsNullOrWhiteSpace(result.ReleasePageUrl))
+            {
+                UpdateService.OpenReleasePage(result.ReleasePageUrl);
+            }
+        }
+        finally
+        {
+            checkUpdatesButton.Enabled = true;
+        }
     }
 
     private void LoadRoots()

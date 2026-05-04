@@ -1,6 +1,7 @@
 {
   "app.title": "Local Image Viewer",
   "menu.settings": "Settings",
+  "menu.checkUpdates": "Check for Updates",
   "menu.random": "Random Picks",
   "common.ok": "OK",
   "common.cancel": "Cancel",

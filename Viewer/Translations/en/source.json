@@ -184,5 +184,15 @@
   "폴더 탐색 완료": "Folder Scan Complete",
   "스캔 완료": "Scan Complete",
   "전체 스캔 중...": "Full Scan...",
-  "빠른 동기화 중...": "Quick Sync..."
+  "빠른 동기화 중...": "Quick Sync...",
+  "업데이트": "Updates",
+  "업데이트 확인": "Check for Updates",
+  "시작 시 업데이트 확인": "Check for updates on startup",
+  "업데이트 확인 실패": "Update Check Failed",
+  "업데이트 발견": "Update Available",
+  "업데이트 URL이 설정되지 않았습니다.": "Update URL is not configured.",
+  "릴리즈 정보를 읽을 수 없습니다.": "Could not read release information.",
+  "현재 최신 버전입니다.\n\n현재 버전: {0}": "You are up to date.\n\nCurrent version: {0}",
+  "새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?": "A new version is available.\n\nCurrent version: {0}\nLatest version: {1}\n\nOpen the release page?",
+  "예: https://api.github.com/repos/OWNER/REPO/releases/latest": "Example: https://api.github.com/repos/OWNER/REPO/releases/latest"
 }

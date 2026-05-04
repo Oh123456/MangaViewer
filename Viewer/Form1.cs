@@ -113,7 +113,10 @@ public sealed class Form1 : Form
         settingsMenuItem.Click += (_, _) => OpenSettings();
         var randomMenuItem = new ToolStripMenuItem(Localization.T("menu.random"));
         randomMenuItem.Click += (_, _) => ShowRandomFolders();
+        var updateMenuItem = new ToolStripMenuItem(Localization.T("menu.checkUpdates"));
+        updateMenuItem.Click += async (_, _) => await CheckForUpdatesAsync(showNoUpdateMessage: true);
         menuStrip.Items.Add(settingsMenuItem);
+        menuStrip.Items.Add(updateMenuItem);
         menuStrip.Items.Add(randomMenuItem);
         MainMenuStrip = menuStrip;
 
@@ -721,6 +724,54 @@ public sealed class Form1 : Form
         statusLabel.Text = rootCount == 0
             ? "루트 폴더를 추가한 뒤 스캔/동기화를 실행하세요."
             : $"루트 {rootCount}개 등록됨";
+        if (AppSettings.Current.AutoCheckForUpdates)
+        {
+            _ = CheckForUpdatesAsync(showNoUpdateMessage: false);
+        }
+    }
+
+    private async Task CheckForUpdatesAsync(bool showNoUpdateMessage)
+    {
+        var result = await UpdateService.CheckLatestAsync();
+        if (!result.IsConfigured)
+        {
+            if (showNoUpdateMessage)
+            {
+                MessageBox.Show(this, result.ErrorMessage, Localization.T("업데이트 확인"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
+        {
+            if (showNoUpdateMessage)
+            {
+                MessageBox.Show(this, result.ErrorMessage, Localization.T("업데이트 확인 실패"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+
+            return;
+        }
+
+        if (!result.HasUpdate)
+        {
+            if (showNoUpdateMessage)
+            {
+                MessageBox.Show(this, string.Format(Localization.T("현재 최신 버전입니다.\n\n현재 버전: {0}"), result.CurrentVersion), Localization.T("업데이트 확인"), MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            return;
+        }
+
+        var message = string.Format(
+            Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?"),
+            result.CurrentVersion,
+            result.LatestVersion);
+        var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (dialogResult == DialogResult.Yes && !string.IsNullOrWhiteSpace(result.ReleasePageUrl))
+        {
+            UpdateService.OpenReleasePage(result.ReleasePageUrl);
+        }
     }
 
     private async Task ScanAsync(ScanMode scanMode)
@@ -2638,10 +2689,11 @@ public sealed class Form1 : Form
         {
             Localization.ApplyTo(this, toolTip);
             Text = Localization.T("app.title");
-            if (MainMenuStrip?.Items.Count >= 2)
+            if (MainMenuStrip?.Items.Count >= 3)
             {
                 MainMenuStrip.Items[0].Text = Localization.T("menu.settings");
-                MainMenuStrip.Items[1].Text = Localization.T("menu.random");
+                MainMenuStrip.Items[1].Text = Localization.T("menu.checkUpdates");
+                MainMenuStrip.Items[2].Text = Localization.T("menu.random");
             }
 
             scanButton.Text = Localization.T("toolbar.quickSync");
