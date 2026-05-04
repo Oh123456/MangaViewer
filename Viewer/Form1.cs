@@ -6,12 +6,18 @@ public sealed class Form1 : Form
     private readonly FolderScanner scanner = new();
 
     private readonly Button scanButton = new();
+    private readonly Button fullScanButton = new();
     private readonly Button randomButton = new();
     private readonly ComboBox searchFieldComboBox = new();
     private readonly TextBox searchBox = new();
     private readonly Button tagFilterButton = new();
     private readonly ToolStripDropDown tagFilterDropDown = new();
     private readonly CheckedListBox tagFilterListBox = new();
+    private readonly Button toggleAllTagFilterButton = new();
+    private readonly Button excludedTagFilterButton = new();
+    private readonly ToolStripDropDown excludedTagFilterDropDown = new();
+    private readonly CheckedListBox excludedTagFilterListBox = new();
+    private readonly Button toggleAllExcludedTagFilterButton = new();
     private readonly ComboBox tagFilterModeComboBox = new();
     private readonly Button clearTagFilterButton = new();
     private readonly ComboBox sortComboBox = new();
@@ -37,27 +43,44 @@ public sealed class Form1 : Form
     private readonly Button thumbnailButton = new();
     private readonly Button openFolderButton = new();
     private readonly Button copyPathButton = new();
+    private readonly Button moveToMainRootButton = new();
     private readonly Button deleteFolderButton = new();
     private readonly Label statusLabel = new();
     private readonly Label tagFilterStatusLabel = new();
+    private readonly Button firstPageButton = new();
+    private readonly Button previousPageButton = new();
+    private readonly Button nextPageButton = new();
+    private readonly Button lastPageButton = new();
+    private readonly Label pageStatusLabel = new();
+    private readonly ComboBox pageSizeComboBox = new();
     private readonly ToolTip toolTip = new();
     private readonly ContextMenuStrip folderListMenu = new();
+    private readonly ToolStripMenuItem moveSelectedToMainRootMenuItem = new();
+    private readonly ToolStripMenuItem deleteSelectedFoldersMenuItem = new();
 
     private List<FolderItem> folders = [];
     private List<FolderItem> randomFolders = [];
     private readonly List<string> activeTagFilters = [];
+    private readonly List<string> excludedTagFilters = [];
     private FolderItem? selectedFolder;
     private bool loadingDetails;
     private bool updatingTagFilterListBox;
     private bool suppressTabChanged;
+    private bool applyingLocalization;
     private int sortedColumnIndex = -1;
     private bool sortDescending;
+    private int currentPageIndex;
+    private int pageSize = 500;
+    private int totalFolderCount;
     private CancellationTokenSource? scanCancellationTokenSource;
     private CancellationTokenSource? thumbnailLoadCancellationTokenSource;
+
+    private readonly record struct FolderListViewport(long? TopFolderId, int TopIndex);
 
     public Form1()
     {
         BuildUi();
+        ApplyLocalization();
         ApplySavedWindowPlacement();
         Shown += async (_, _) => await OnShownAsync();
         FormClosing += (_, _) => SaveWindowPlacement();
@@ -65,7 +88,8 @@ public sealed class Form1 : Form
 
     private void BuildUi()
     {
-        Text = "로컬 이미지 뷰어";
+        Text = Localization.T("app.title");
+        AppIcons.ApplyTo(this);
         Width = 1440;
         Height = 1040;
         MinimumSize = new Size(1120, 900);
@@ -85,33 +109,44 @@ public sealed class Form1 : Form
         {
             Dock = DockStyle.Top
         };
-        var settingsMenuItem = new ToolStripMenuItem("설정");
+        var settingsMenuItem = new ToolStripMenuItem(Localization.T("menu.settings"));
         settingsMenuItem.Click += (_, _) => OpenSettings();
+        var randomMenuItem = new ToolStripMenuItem(Localization.T("menu.random"));
+        randomMenuItem.Click += (_, _) => ShowRandomFolders();
         menuStrip.Items.Add(settingsMenuItem);
+        menuStrip.Items.Add(randomMenuItem);
         MainMenuStrip = menuStrip;
 
         var toolbar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 10,
+            ColumnCount = 12,
             Padding = new Padding(8)
         };
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 10));
 
-        scanButton.Text = "스캔/동기화";
+        scanButton.Text = Localization.T("toolbar.quickSync");
         scanButton.Dock = DockStyle.Fill;
-        scanButton.Click += async (_, _) => await ScanAsync();
+        scanButton.Click += async (_, _) => await ScanAsync(ScanMode.QuickSync);
+        toolTip.SetToolTip(scanButton, "기존 DB 폴더의 변경 시각을 먼저 확인해서 변경 없는 폴더는 빠르게 건너뜁니다.");
 
-        randomButton.Text = "랜덤";
+        fullScanButton.Text = Localization.T("toolbar.fullScan");
+        fullScanButton.Dock = DockStyle.Fill;
+        fullScanButton.Click += async (_, _) => await ScanAsync(ScanMode.FullRescan);
+        toolTip.SetToolTip(fullScanButton, "모든 폴더의 이미지 목록을 다시 확인합니다. 오래 걸릴 수 있습니다.");
+
+        randomButton.Text = Localization.T("toolbar.random");
         randomButton.Dock = DockStyle.Fill;
         randomButton.Click += (_, _) => ShowRandomFolders();
         toolTip.SetToolTip(randomButton, "현재 검색/탭/태그 조건의 목록에서 무작위로 골라 보여줍니다.");
@@ -120,14 +155,20 @@ public sealed class Form1 : Form
         searchFieldComboBox.Items.AddRange(["이름", "작가", "메모", "경로", "묶음"]);
         searchFieldComboBox.SelectedIndex = 0;
         searchFieldComboBox.Dock = DockStyle.Fill;
-        searchFieldComboBox.SelectedIndexChanged += (_, _) => LoadFolders();
+        searchFieldComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (!applyingLocalization)
+            {
+                LoadFolders();
+            }
+        };
         toolTip.SetToolTip(searchFieldComboBox, "검색할 항목을 선택합니다. 기본값은 이름입니다.");
 
-        searchBox.PlaceholderText = "검색어";
+        searchBox.PlaceholderText = Localization.T("toolbar.search");
         searchBox.Dock = DockStyle.Fill;
         searchBox.TextChanged += (_, _) => LoadFolders();
 
-        tagFilterButton.Text = "태그";
+        tagFilterButton.Text = Localization.T("toolbar.tag");
         tagFilterButton.Dock = DockStyle.Fill;
         tagFilterButton.TextAlign = ContentAlignment.MiddleLeft;
         tagFilterButton.Click += (_, _) => ShowTagFilterMenu();
@@ -143,18 +184,39 @@ public sealed class Form1 : Form
         toolTip.SetToolTip(tagFilterButton, "태그 메뉴를 열어 필터를 선택합니다. 선택된 태그를 다시 누르면 해제됩니다.");
         BuildTagFilterDropDown();
 
+        excludedTagFilterButton.Text = Localization.T("toolbar.excludedTag");
+        excludedTagFilterButton.Dock = DockStyle.Fill;
+        excludedTagFilterButton.TextAlign = ContentAlignment.MiddleLeft;
+        excludedTagFilterButton.Click += (_, _) => ShowExcludedTagFilterMenu();
+        excludedTagFilterButton.KeyDown += (_, keyEventArgs) =>
+        {
+            if (keyEventArgs.KeyCode == Keys.Escape)
+            {
+                MoveFocusAwayFromTagFilter();
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+        };
+        toolTip.SetToolTip(excludedTagFilterButton, "선택한 태그가 하나라도 포함된 폴더를 목록에서 제외합니다.");
+        BuildExcludedTagFilterDropDown();
+
         tagFilterModeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
-        tagFilterModeComboBox.Items.AddRange(["AND", "OR"]);
+        tagFilterModeComboBox.Items.AddRange([Localization.T("tagMode.contains"), Localization.T("tagMode.and"), Localization.T("tagMode.or")]);
         tagFilterModeComboBox.SelectedIndex = 0;
         tagFilterModeComboBox.Dock = DockStyle.Fill;
         tagFilterModeComboBox.SelectedIndexChanged += (_, _) =>
         {
+            if (applyingLocalization)
+            {
+                return;
+            }
+
             UpdateTagFilterStatus();
             LoadFolders();
         };
-        toolTip.SetToolTip(tagFilterModeComboBox, "AND: 선택한 태그를 모두 가진 폴더, OR: 선택한 태그 중 하나라도 가진 폴더");
+        toolTip.SetToolTip(tagFilterModeComboBox, "포함/AND: 선택한 태그를 모두 가진 폴더, OR: 선택한 태그 중 하나라도 가진 폴더");
 
-        clearTagFilterButton.Text = "전체";
+        clearTagFilterButton.Text = Localization.T("toolbar.clear");
         clearTagFilterButton.Dock = DockStyle.Fill;
         clearTagFilterButton.Click += (_, _) => ClearTagFilter();
         toolTip.SetToolTip(clearTagFilterButton, "태그 필터를 모두 비우고 전체 목록을 표시합니다.");
@@ -163,24 +225,38 @@ public sealed class Form1 : Form
         sortComboBox.Items.AddRange(["날짜 순", "이름 순", "작가 순", "점수 순", "최근 본 순", "묶음 순", "이미지 수 순"]);
         sortComboBox.SelectedIndex = 0;
         sortComboBox.Dock = DockStyle.Fill;
-        sortComboBox.SelectedIndexChanged += (_, _) => LoadFolders();
+        sortComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (!applyingLocalization)
+            {
+                LoadFolders();
+            }
+        };
 
         quickFilterComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
         quickFilterComboBox.Items.AddRange(["전체", "미열람", "점수 없음", "태그 없음", "묶음 없음", "썸네일 없음", "깨진 경로"]);
         quickFilterComboBox.SelectedIndex = 0;
         quickFilterComboBox.Dock = DockStyle.Fill;
-        quickFilterComboBox.SelectedIndexChanged += (_, _) => LoadFolders();
+        quickFilterComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (!applyingLocalization)
+            {
+                LoadFolders();
+            }
+        };
         toolTip.SetToolTip(quickFilterComboBox, "정리가 필요한 항목만 빠르게 필터링합니다.");
 
         toolbar.Controls.Add(scanButton, 0, 0);
-        toolbar.Controls.Add(randomButton, 1, 0);
-        toolbar.Controls.Add(searchFieldComboBox, 2, 0);
-        toolbar.Controls.Add(searchBox, 3, 0);
-        toolbar.Controls.Add(tagFilterButton, 4, 0);
-        toolbar.Controls.Add(tagFilterModeComboBox, 5, 0);
-        toolbar.Controls.Add(clearTagFilterButton, 6, 0);
-        toolbar.Controls.Add(sortComboBox, 7, 0);
-        toolbar.Controls.Add(quickFilterComboBox, 8, 0);
+        toolbar.Controls.Add(fullScanButton, 1, 0);
+        toolbar.Controls.Add(randomButton, 2, 0);
+        toolbar.Controls.Add(searchFieldComboBox, 3, 0);
+        toolbar.Controls.Add(searchBox, 4, 0);
+        toolbar.Controls.Add(tagFilterButton, 5, 0);
+        toolbar.Controls.Add(excludedTagFilterButton, 6, 0);
+        toolbar.Controls.Add(tagFilterModeComboBox, 7, 0);
+        toolbar.Controls.Add(clearTagFilterButton, 8, 0);
+        toolbar.Controls.Add(sortComboBox, 9, 0);
+        toolbar.Controls.Add(quickFilterComboBox, 10, 0);
 
         var contentLayout = new TableLayoutPanel
         {
@@ -193,11 +269,12 @@ public sealed class Form1 : Form
 
         tabs.Dock = DockStyle.Top;
         tabs.Height = 32;
-        tabs.TabPages.Add("전체 목록");
-        tabs.TabPages.Add("즐겨찾기");
-        tabs.TabPages.Add("최근 본 것");
-        tabs.TabPages.Add("보류함");
-        tabs.TabPages.Add("묶음 목록");
+        tabs.TabPages.Add(Localization.T("tabs.all"));
+        tabs.TabPages.Add(Localization.T("tabs.favorites"));
+        tabs.TabPages.Add(Localization.T("tabs.recent"));
+        tabs.TabPages.Add(Localization.T("tabs.reserved"));
+        tabs.TabPages.Add(Localization.T("tabs.series"));
+        tabs.TabPages.Add(Localization.T("tabs.newRegistration"));
         tabs.SelectedIndexChanged += (_, _) =>
         {
             if (suppressTabChanged)
@@ -208,6 +285,7 @@ public sealed class Form1 : Form
             if (tabs.SelectedTab == randomTabPage)
             {
                 folders = randomFolders;
+                currentPageIndex = 0;
                 PopulateFolderList(null, autoSelectFirst: true);
                 statusLabel.Text = $"랜덤 추천 {folders.Count}개";
                 return;
@@ -235,6 +313,17 @@ public sealed class Form1 : Form
         folderList.ColumnClick += (_, columnClickEventArgs) => SortByColumn(columnClickEventArgs.Column);
         folderList.ColumnWidthChanged += (_, _) => SaveColumnWidths();
         folderList.DoubleClick += (_, _) => OpenViewer();
+        folderList.KeyDown += (_, keyEventArgs) =>
+        {
+            if (keyEventArgs.KeyCode != Keys.Enter || !folderList.Focused)
+            {
+                return;
+            }
+
+            OpenViewer();
+            keyEventArgs.Handled = true;
+            keyEventArgs.SuppressKeyPress = true;
+        };
         folderList.MouseDown += (_, mouseEventArgs) =>
         {
             if (mouseEventArgs.Button != MouseButtons.Right)
@@ -252,8 +341,10 @@ public sealed class Form1 : Form
         BuildFolderListMenu();
         folderList.ContextMenuStrip = folderListMenu;
 
+        var pagingPanel = BuildPagingPanel();
         var leftPanel = new Panel { Dock = DockStyle.Fill };
         leftPanel.Controls.Add(folderList);
+        leftPanel.Controls.Add(pagingPanel);
         leftPanel.Controls.Add(tabs);
 
         var detail = BuildDetailPanel();
@@ -289,6 +380,73 @@ public sealed class Form1 : Form
         statusPanel.MouseDown += (_, _) => MoveFocusAwayFromTagFilter();
         Controls.Add(root);
         Controls.Add(menuStrip);
+    }
+
+    private Control BuildPagingPanel()
+    {
+        var pagingPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 36,
+            FlowDirection = FlowDirection.LeftToRight,
+            Padding = new Padding(6, 4, 6, 4),
+            WrapContents = false
+        };
+
+        firstPageButton.Text = "<<";
+        previousPageButton.Text = "<";
+        nextPageButton.Text = ">";
+        lastPageButton.Text = ">>";
+        foreach (var button in new[] { firstPageButton, previousPageButton, nextPageButton, lastPageButton })
+        {
+            button.Width = 42;
+            button.Height = 26;
+        }
+
+        firstPageButton.Click += (_, _) => MovePage(0);
+        previousPageButton.Click += (_, _) => MovePage(currentPageIndex - 1);
+        nextPageButton.Click += (_, _) => MovePage(currentPageIndex + 1);
+        lastPageButton.Click += (_, _) => MovePage(GetLastPageIndex());
+        toolTip.SetToolTip(firstPageButton, "첫 페이지로 이동합니다.");
+        toolTip.SetToolTip(previousPageButton, "이전 페이지로 이동합니다.");
+        toolTip.SetToolTip(nextPageButton, "다음 페이지로 이동합니다.");
+        toolTip.SetToolTip(lastPageButton, "마지막 페이지로 이동합니다.");
+
+        pageSizeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        pageSizeComboBox.Width = 82;
+        pageSizeComboBox.Items.AddRange(["200", "500", "1000", "2000"]);
+        pageSizeComboBox.SelectedItem = pageSize.ToString();
+        pageSizeComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (applyingLocalization)
+            {
+                return;
+            }
+
+            if (int.TryParse(pageSizeComboBox.SelectedItem?.ToString(), out var selectedPageSize))
+            {
+                pageSize = selectedPageSize;
+                currentPageIndex = 0;
+                selectedFolder = null;
+                if (tabs.SelectedTab == randomTabPage)
+                {
+                    PopulateFolderList(null, autoSelectFirst: true);
+                }
+                else
+                {
+                    LoadCurrentFolderPage();
+                    PopulateFolderList(null, autoSelectFirst: true);
+                }
+            }
+        };
+        toolTip.SetToolTip(pageSizeComboBox, "한 페이지에 표시할 목록 개수입니다.");
+
+        pageStatusLabel.AutoSize = true;
+        pageStatusLabel.Padding = new Padding(8, 5, 0, 0);
+        pageStatusLabel.Text = "0 / 0";
+
+        pagingPanel.Controls.AddRange([firstPageButton, previousPageButton, nextPageButton, lastPageButton, pageSizeComboBox, pageStatusLabel]);
+        return pagingPanel;
     }
 
     private void ApplySavedWindowPlacement()
@@ -418,6 +576,9 @@ public sealed class Form1 : Form
         copyPathButton.Text = "경로 복사";
         copyPathButton.Click += (_, _) => CopySelectedFolderPath();
 
+        moveToMainRootButton.Text = "메인으로 이동";
+        moveToMainRootButton.Click += (_, _) => MoveSelectedFolderToMainRoot();
+
         deleteFolderButton.Text = "DB에서 제거";
         deleteFolderButton.Click += (_, _) => DeleteSelectedFolder();
 
@@ -426,9 +587,10 @@ public sealed class Form1 : Form
         StyleDetailButton(thumbnailButton, "선택한 폴더 안의 이미지 중 하나를 목록 썸네일로 지정합니다.");
         StyleDetailButton(openFolderButton, "선택한 폴더를 파일 탐색기로 엽니다.");
         StyleDetailButton(copyPathButton, "선택한 폴더 경로를 클립보드에 복사합니다.");
+        StyleDetailButton(moveToMainRootButton, "신규등록 폴더를 선택한 메인 루트 아래로 이동하고 DB 경로를 즉시 갱신합니다.");
         StyleDetailButton(deleteFolderButton, "실제 파일은 유지하고 이 폴더를 DB 목록에서만 제거합니다.");
 
-        buttons.Controls.AddRange([saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, deleteFolderButton]);
+        buttons.Controls.AddRange([saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton]);
         panel.Controls.Add(buttons, 1, 12);
 
         foreach (Control control in panel.Controls)
@@ -466,10 +628,19 @@ public sealed class Form1 : Form
         folderListMenu.Items.Add("보류함 설정", null, (_, _) => SetSelectedFoldersReserved(true));
         folderListMenu.Items.Add("보류함 해제", null, (_, _) => SetSelectedFoldersReserved(false));
         folderListMenu.Items.Add(new ToolStripSeparator());
-        folderListMenu.Items.Add("선택 항목 DB에서 제거", null, (_, _) => DeleteSelectedFoldersFromList());
+        moveSelectedToMainRootMenuItem.Text = "선택 항목 메인으로 이동";
+        moveSelectedToMainRootMenuItem.Click += (_, _) => MoveSelectedFoldersToMainRoot();
+        folderListMenu.Items.Add(moveSelectedToMainRootMenuItem);
+        folderListMenu.Items.Add(new ToolStripSeparator());
+        deleteSelectedFoldersMenuItem.Text = "선택 항목 DB에서 제거";
+        deleteSelectedFoldersMenuItem.Click += (_, _) => DeleteSelectedFoldersFromList();
+        folderListMenu.Items.Add(deleteSelectedFoldersMenuItem);
         folderListMenu.Opening += (_, cancelEventArgs) =>
         {
             cancelEventArgs.Cancel = folderList.SelectedItems.Count == 0;
+            var isNewRegistration = GetCurrentFolderListMode() == FolderListMode.NewRegistration;
+            moveSelectedToMainRootMenuItem.Visible = isNewRegistration;
+            deleteSelectedFoldersMenuItem.Text = isNewRegistration ? "선택 항목 폴더 삭제" : "선택 항목 DB에서 제거";
         };
     }
 
@@ -532,7 +703,9 @@ public sealed class Form1 : Form
         var sortText = sortComboBox.SelectedItem?.ToString() ?? "정렬";
         var directionText = sortDescending ? "역순" : "기본순";
         var selectedText = folderList.SelectedItems.Count == 0 ? "" : $" / 선택 {folderList.SelectedItems.Count}개";
-        statusLabel.Text = $"{sortText} {directionText} / 목록 {folderList.Items.Count}개{selectedText}";
+        var pageStart = totalFolderCount == 0 ? 0 : currentPageIndex * pageSize + 1;
+        var pageEnd = totalFolderCount == 0 ? 0 : Math.Min(totalFolderCount, currentPageIndex * pageSize + folders.Count);
+        statusLabel.Text = $"{sortText} {directionText} / 표시 {pageStart:N0}-{pageEnd:N0} / 전체 {totalFolderCount:N0}개{selectedText}";
     }
 
     private async Task OnShownAsync()
@@ -550,7 +723,7 @@ public sealed class Form1 : Form
             : $"루트 {rootCount}개 등록됨";
     }
 
-    private async Task ScanAsync()
+    private async Task ScanAsync(ScanMode scanMode)
     {
         var roots = database.GetRoots();
         if (roots.Count == 0)
@@ -564,26 +737,35 @@ public sealed class Form1 : Form
         scanCancellationTokenSource = new CancellationTokenSource();
         var scanLog = new ScanLog();
         using var progressForm = new ScanProgressForm(CancelScan);
+        var modeText = scanMode == ScanMode.QuickSync ? "빠른 동기화" : "전체 스캔";
         var progress = new Progress<ScanProgress>(scanProgress =>
         {
-            var statusText = $"스캔 {scanProgress.FoldersVisited}개 / 이미지 폴더 {scanProgress.ImageFoldersFound}개 / 저장 {scanProgress.SavedFolders}개 / 변경 없음 {scanProgress.SkippedFolders}개";
+            var stageText = string.IsNullOrWhiteSpace(scanProgress.Stage) ? modeText : scanProgress.Stage;
+            var statusText = FormatScanProgressText(stageText, scanProgress);
             statusLabel.Text = statusText;
             progressForm.UpdateStatus(statusText);
         });
+        var totalStopwatch = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
             progressForm.Show(this);
             progressForm.UpdateStatus("기존 DB 상태 확인 중...");
+            var databaseStateStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var existingSignatureMap = await Task.Run(database.GetFolderScanSignatureMap, scanCancellationTokenSource.Token);
+            scanLog.Add($"기존 DB 상태 확인 완료: {existingSignatureMap.Count}개 / {databaseStateStopwatch.Elapsed:mm\\:ss\\.fff}");
 
-            progressForm.UpdateStatus("스캔 및 변경분 저장 중...");
+            progressForm.UpdateStatus($"{modeText} 중...");
             using var scanWriteSession = database.BeginScanWriteSession();
             var summary = await scanner.ScanStreamingAsync(
                 roots,
+                scanMode,
+                existingSignatureMap,
                 result =>
                 {
                     return !existingSignatureMap.TryGetValue(result.FolderPath, out var existingSignature)
+                        || existingSignature.DirectoryModifiedAt is null
+                        || result.DirectoryModifiedAt > existingSignature.DirectoryModifiedAt.Value
                         || result.FolderModifiedAt > existingSignature.FolderModifiedAt
                         || result.ImageCount != existingSignature.ImageCount
                         || result.TotalImageBytes != existingSignature.TotalImageBytes;
@@ -593,16 +775,32 @@ public sealed class Form1 : Form
                 scanLog,
                 scanCancellationTokenSource.Token);
             scanWriteSession.Commit();
+            scanLog.Add($"변경분 DB 저장 완료: 저장 {summary.SavedFolders}개 / 변경 없음 {summary.SkippedFolders}개");
 
-            progressForm.UpdateStatus("삭제/누락 항목 동기화 중...");
+            progressForm.UpdateStatus("누락 폴더 정리 중...");
+            scanLog.Add("누락 폴더 정리 시작");
+            var cleanupStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var cleanupSummary = await Task.Run(() =>
             {
                 scanCancellationTokenSource.Token.ThrowIfCancellationRequested();
-                return database.RemoveMissingFoldersAndImages();
+                return database.RemoveMissingFoldersAndImages(checkImageFiles: false);
             }, scanCancellationTokenSource.Token);
+            scanLog.Add($"누락 폴더 정리 완료: 삭제 폴더 {cleanupSummary.RemovedFolders}개 / 삭제 이미지 {cleanupSummary.RemovedImages}개 / {cleanupStopwatch.Elapsed:mm\\:ss\\.fff}");
             summary.RemovedFolders = cleanupSummary.RemovedFolders;
             summary.RemovedImages = cleanupSummary.RemovedImages;
-            var summaryText = $"스캔 완료: 이미지 폴더 {summary.ImageFoldersFound}개 / 저장 {summary.SavedFolders}개 / 변경 없음 {summary.SkippedFolders}개 / 삭제 폴더 {summary.RemovedFolders}개 / 삭제 이미지 {summary.RemovedImages}개";
+            if (AppSettings.Current.AutoRefreshPathStatusAfterScan)
+            {
+                progressForm.UpdateStatus("경로 확인 캐시 갱신 중...");
+                scanLog.Add("경로 확인 캐시 갱신 시작");
+                var pathRefreshStopwatch = System.Diagnostics.Stopwatch.StartNew();
+                var pathProgress = new Progress<string>(message => progressForm.UpdateStatus(message));
+                var missingPathCount = await Task.Run(
+                    () => database.RefreshFolderPathStatus(pathProgress, scanCancellationTokenSource.Token),
+                    scanCancellationTokenSource.Token);
+                scanLog.Add($"경로 확인 캐시 갱신 완료: 깨진 경로 {missingPathCount}개 / {pathRefreshStopwatch.Elapsed:mm\\:ss\\.fff}");
+            }
+
+            var summaryText = FormatScanSummaryText(modeText, summary, totalStopwatch.Elapsed);
             scanLog.Add(summaryText);
             LoadTagFilters();
             await Task.Yield();
@@ -633,7 +831,31 @@ public sealed class Form1 : Form
     private void CancelScan()
     {
         scanCancellationTokenSource?.Cancel();
-        statusLabel.Text = "스캔 취소 요청 중...";
+        statusLabel.Text = Localization.T("스캔 취소 요청 중...");
+    }
+
+    private static string FormatScanProgressText(string stageText, ScanProgress scanProgress)
+    {
+        return string.Format(
+            Localization.T("scan.progress"),
+            Localization.T(stageText),
+            scanProgress.FoldersVisited,
+            scanProgress.ImageFoldersFound,
+            scanProgress.SavedFolders,
+            scanProgress.SkippedFolders);
+    }
+
+    private static string FormatScanSummaryText(string modeText, ScanSummary summary, TimeSpan elapsed)
+    {
+        return string.Format(
+            Localization.T("scan.summary"),
+            Localization.T(modeText),
+            summary.ImageFoldersFound,
+            summary.SavedFolders,
+            summary.SkippedFolders,
+            summary.RemovedFolders,
+            summary.RemovedImages,
+            elapsed.ToString(@"mm\:ss"));
     }
 
     private void LoadFolders(long? folderIdToSelect = null, bool autoSelectFirst = true)
@@ -645,8 +867,12 @@ public sealed class Form1 : Form
             return;
         }
 
-        folders = QueryCurrentFolders();
-        ApplyListSortDirection();
+        if (folderIdToSelect is null)
+        {
+            currentPageIndex = 0;
+        }
+
+        LoadCurrentFolderPage();
         PopulateFolderList(selectedId, autoSelectFirst);
     }
 
@@ -655,6 +881,7 @@ public sealed class Form1 : Form
         if (randomFolders.Count == 0)
         {
             folders = [];
+            totalFolderCount = 0;
             PopulateFolderList(selectedId, autoSelectFirst);
             return;
         }
@@ -663,13 +890,14 @@ public sealed class Form1 : Form
             .Select((folder, order) => new { folder.Id, Order = order })
             .ToDictionary(item => item.Id, item => item.Order);
         var refreshedFolders = database
-            .GetFolders(FolderListMode.All, FolderSortMode.Name, FolderSearchField.Name, "", [], TagFilterMode.And)
+            .GetFolders(FolderListMode.All, FolderSortMode.Name, FolderSearchField.Name, "", [], [], TagFilterMode.And)
             .Where(folder => randomOrder.ContainsKey(folder.Id))
             .OrderBy(folder => randomOrder[folder.Id])
             .ToList();
 
         randomFolders = refreshedFolders;
         folders = randomFolders;
+        totalFolderCount = folders.Count;
         ApplyListSortDirection();
         PopulateFolderList(selectedId, autoSelectFirst);
     }
@@ -698,6 +926,7 @@ public sealed class Form1 : Form
             2 when tabs.SelectedTab != randomTabPage => FolderListMode.Recent,
             3 when tabs.SelectedTab != randomTabPage => FolderListMode.Reserved,
             4 when tabs.SelectedTab != randomTabPage => FolderListMode.Series,
+            5 when tabs.SelectedTab != randomTabPage => FolderListMode.NewRegistration,
             _ => FolderListMode.All
         };
         var sortMode = sortComboBox.SelectedIndex switch
@@ -710,7 +939,7 @@ public sealed class Form1 : Form
             6 => FolderSortMode.ImageCount,
             _ => FolderSortMode.Date
         };
-        var tagFilterMode = tagFilterModeComboBox.SelectedIndex == 1 ? TagFilterMode.Or : TagFilterMode.And;
+        var tagFilterMode = GetCurrentTagFilterMode();
         var quickFilterMode = quickFilterComboBox.SelectedIndex switch
         {
             1 => QuickFilterMode.Unviewed,
@@ -722,40 +951,127 @@ public sealed class Form1 : Form
             _ => QuickFilterMode.All
         };
 
-        var result = database.GetFolders(mode, sortMode, searchField, searchBox.Text, activeTagFilters, tagFilterMode, quickFilterMode);
-        if (quickFilterMode == QuickFilterMode.BrokenPath)
+        var result = database.GetFolders(mode, sortMode, searchField, searchBox.Text, activeTagFilters, excludedTagFilters, tagFilterMode, quickFilterMode);
+        return result;
+    }
+
+    private void LoadCurrentFolderPage()
+    {
+        var searchField = GetCurrentSearchField();
+        var mode = GetCurrentFolderListMode();
+        var sortMode = GetCurrentSortMode();
+        var tagFilterMode = GetCurrentTagFilterMode();
+        var quickFilterMode = GetCurrentQuickFilterMode();
+        var result = database.GetFoldersPage(
+            mode,
+            sortMode,
+            searchField,
+            searchBox.Text,
+            activeTagFilters,
+            excludedTagFilters,
+            tagFilterMode,
+            quickFilterMode,
+            currentPageIndex * pageSize,
+            pageSize,
+            sortDescending);
+        folders = result.Items;
+        totalFolderCount = result.TotalCount;
+    }
+
+    private FolderSearchField GetCurrentSearchField()
+    {
+        return searchFieldComboBox.SelectedIndex switch
         {
-            result = result.Where(folder => !Directory.Exists(folder.Path)).ToList();
+            1 => FolderSearchField.Author,
+            2 => FolderSearchField.Memo,
+            3 => FolderSearchField.Path,
+            4 => FolderSearchField.Series,
+            _ => FolderSearchField.Name
+        };
+    }
+
+    private FolderListMode GetCurrentFolderListMode()
+    {
+        return tabs.SelectedIndex switch
+        {
+            1 when tabs.SelectedTab != randomTabPage => FolderListMode.Favorites,
+            2 when tabs.SelectedTab != randomTabPage => FolderListMode.Recent,
+            3 when tabs.SelectedTab != randomTabPage => FolderListMode.Reserved,
+            4 when tabs.SelectedTab != randomTabPage => FolderListMode.Series,
+            5 when tabs.SelectedTab != randomTabPage => FolderListMode.NewRegistration,
+            _ => FolderListMode.All
+        };
+    }
+
+    private FolderSortMode GetCurrentSortMode()
+    {
+        if (GetCurrentFolderListMode() == FolderListMode.Recent)
+        {
+            return FolderSortMode.Recent;
         }
 
-        return result;
+        return sortComboBox.SelectedIndex switch
+        {
+            1 => FolderSortMode.Name,
+            2 => FolderSortMode.Author,
+            3 => FolderSortMode.Score,
+            4 => FolderSortMode.Recent,
+            5 => FolderSortMode.Series,
+            6 => FolderSortMode.ImageCount,
+            _ => FolderSortMode.Date
+        };
+    }
+
+    private QuickFilterMode GetCurrentQuickFilterMode()
+    {
+        return quickFilterComboBox.SelectedIndex switch
+        {
+            1 => QuickFilterMode.Unviewed,
+            2 => QuickFilterMode.NoScore,
+            3 => QuickFilterMode.NoTags,
+            4 => QuickFilterMode.NoSeries,
+            5 => QuickFilterMode.NoThumbnail,
+            6 => QuickFilterMode.BrokenPath,
+            _ => QuickFilterMode.All
+        };
+    }
+
+    private TagFilterMode GetCurrentTagFilterMode()
+    {
+        return tagFilterModeComboBox.SelectedIndex switch
+        {
+            1 => TagFilterMode.And,
+            2 => TagFilterMode.Or,
+            _ => TagFilterMode.Contains
+        };
     }
 
     private void PopulateFolderList(long? selectedId, bool autoSelectFirst)
     {
+        var viewport = CaptureFolderListViewport();
+        if (selectedId is not null)
+        {
+            var selectedIndex = folders.FindIndex(folder => folder.Id == selectedId.Value);
+            if (selectedIndex >= 0)
+            {
+                currentPageIndex = tabs.SelectedTab == randomTabPage ? selectedIndex / pageSize : currentPageIndex;
+            }
+        }
+
+        ClampCurrentPage();
+        var visibleFolders = GetCurrentPageFolders();
         folderList.BeginUpdate();
         folderList.Items.Clear();
-        foreach (var folder in folders)
+        foreach (var folder in visibleFolders)
         {
-            var item = new ListViewItem(folder.DisplayName);
-            item.SubItems.Add(folder.Author ?? "");
-            item.SubItems.Add(folder.TagSummary);
-            item.SubItems.Add(folder.Score.ToString());
-            item.SubItems.Add(folder.SeriesName ?? "");
-            item.SubItems.Add(folder.SeriesOrder?.ToString() ?? "");
-            item.SubItems.Add(Shorten(folder.Memo, 80));
-            item.SubItems.Add(folder.ImageCount.ToString());
-            item.SubItems.Add(folder.FolderModifiedAt?.ToString("yyyy-MM-dd") ?? "");
+            var item = new ListViewItem();
             item.Tag = folder;
-            if (!string.IsNullOrWhiteSpace(folder.SeriesName))
-            {
-                item.BackColor = Color.FromArgb(245, 250, 255);
-            }
-
+            UpdateFolderListItem(item, folder);
             folderList.Items.Add(item);
         }
 
         folderList.EndUpdate();
+        UpdatePagingControls();
         UpdateListStatus();
         if (folders.Count == 0)
         {
@@ -771,11 +1087,12 @@ public sealed class Form1 : Form
         {
             selectedItem.Selected = true;
             selectedItem.Focused = true;
-            selectedItem.EnsureVisible();
             if (selectedItem.Tag is FolderItem selectedFolderItem)
             {
                 ShowFolder(selectedFolderItem);
             }
+
+            RestoreFolderListViewport(viewport);
         }
         else if (autoSelectFirst && selectedFolder is null && folderList.Items.Count > 0)
         {
@@ -794,41 +1111,224 @@ public sealed class Form1 : Form
         }
     }
 
+    private void RefreshFolderListItem(FolderItem folder)
+    {
+        var item = folderList.Items
+            .Cast<ListViewItem>()
+            .FirstOrDefault(listItem => listItem.Tag is FolderItem itemFolder && itemFolder.Id == folder.Id);
+        if (item is null)
+        {
+            return;
+        }
+
+        UpdateFolderListItem(item, folder);
+        UpdateListStatus();
+    }
+
+    private void UpdateFolderListItem(ListViewItem item, FolderItem folder)
+    {
+        item.Text = folder.DisplayName;
+        SetListSubItem(item, 1, folder.Author ?? "");
+        SetListSubItem(item, 2, folder.TagSummary);
+        SetListSubItem(item, 3, folder.Score.ToString());
+        SetListSubItem(item, 4, folder.SeriesName ?? "");
+        SetListSubItem(item, 5, folder.SeriesOrder?.ToString() ?? "");
+        SetListSubItem(item, 6, Shorten(folder.Memo, 80));
+        SetListSubItem(item, 7, folder.ImageCount.ToString());
+        SetListSubItem(item, 8, folder.FolderModifiedAt?.ToString("yyyy-MM-dd") ?? "");
+        item.BackColor = string.IsNullOrWhiteSpace(folder.SeriesName)
+            ? folderList.BackColor
+            : Color.FromArgb(245, 250, 255);
+    }
+
+    private static void SetListSubItem(ListViewItem item, int index, string text)
+    {
+        while (item.SubItems.Count <= index)
+        {
+            item.SubItems.Add("");
+        }
+
+        item.SubItems[index].Text = text;
+    }
+
+    private FolderListViewport CaptureFolderListViewport()
+    {
+        if (folderList.Items.Count == 0)
+        {
+            return new FolderListViewport(null, 0);
+        }
+
+        try
+        {
+            var topItem = folderList.TopItem;
+            long? topFolderId = topItem?.Tag is FolderItem folder ? folder.Id : null;
+            return new FolderListViewport(topFolderId, topItem?.Index ?? 0);
+        }
+        catch
+        {
+            return new FolderListViewport(null, 0);
+        }
+    }
+
+    private void RestoreFolderListViewport(FolderListViewport viewport)
+    {
+        if (folderList.Items.Count == 0)
+        {
+            return;
+        }
+
+        ListViewItem? topItem = null;
+        if (viewport.TopFolderId is not null)
+        {
+            topItem = folderList.Items
+                .Cast<ListViewItem>()
+                .FirstOrDefault(item => item.Tag is FolderItem folder && folder.Id == viewport.TopFolderId.Value);
+        }
+
+        topItem ??= folderList.Items[Math.Clamp(viewport.TopIndex, 0, folderList.Items.Count - 1)];
+        try
+        {
+            folderList.TopItem = topItem;
+        }
+        catch
+        {
+            topItem.EnsureVisible();
+        }
+    }
+
+    private List<FolderItem> GetCurrentPageFolders()
+    {
+        if (folders.Count == 0)
+        {
+            return [];
+        }
+
+        if (tabs.SelectedTab == randomTabPage)
+        {
+            return folders
+                .Skip(currentPageIndex * pageSize)
+                .Take(pageSize)
+                .ToList();
+        }
+
+        return folders;
+    }
+
+    private void MovePage(int pageIndex)
+    {
+        currentPageIndex = Math.Clamp(pageIndex, 0, GetLastPageIndex());
+        selectedFolder = null;
+        if (tabs.SelectedTab != randomTabPage)
+        {
+            LoadCurrentFolderPage();
+        }
+
+        PopulateFolderList(null, autoSelectFirst: true);
+    }
+
+    private int GetLastPageIndex()
+    {
+        var count = tabs.SelectedTab == randomTabPage
+            ? folders.Count
+            : totalFolderCount;
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        return (count - 1) / pageSize;
+    }
+
+    private void ClampCurrentPage()
+    {
+        currentPageIndex = Math.Clamp(currentPageIndex, 0, GetLastPageIndex());
+    }
+
+    private void UpdatePagingControls()
+    {
+        var count = tabs.SelectedTab == randomTabPage
+            ? folders.Count
+            : totalFolderCount;
+        var totalPages = GetLastPageIndex() + 1;
+        if (count == 0)
+        {
+            totalPages = 0;
+        }
+
+        var pageStart = count == 0 ? 0 : currentPageIndex * pageSize + 1;
+        var pageEnd = count == 0 ? 0 : Math.Min(count, currentPageIndex * pageSize + GetCurrentPageFolders().Count);
+        pageStatusLabel.Text = totalPages == 0
+            ? "0 / 0"
+            : $"{currentPageIndex + 1} / {totalPages}  ({pageStart:N0}-{pageEnd:N0} / {count:N0})";
+
+        firstPageButton.Enabled = currentPageIndex > 0;
+        previousPageButton.Enabled = currentPageIndex > 0;
+        nextPageButton.Enabled = currentPageIndex < GetLastPageIndex();
+        lastPageButton.Enabled = currentPageIndex < GetLastPageIndex();
+    }
+
     private void ShowRandomFolders()
     {
-        var candidates = QueryCurrentFolders();
-        if (candidates.Count == 0)
+        var tagFilterMode = GetCurrentTagFilterMode();
+        var quickFilterMode = GetCurrentQuickFilterMode();
+        var countProbe = database.GetFoldersPage(
+            GetCurrentFolderListMode(),
+            GetCurrentSortMode(),
+            GetCurrentSearchField(),
+            searchBox.Text,
+            activeTagFilters,
+            excludedTagFilters,
+            tagFilterMode,
+            quickFilterMode,
+            0,
+            1,
+            sortDescending);
+        var candidateCount = countProbe.TotalCount;
+        if (candidateCount == 0)
         {
             MessageBox.Show(this, "랜덤으로 고를 이미지 폴더가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
-        using var dialog = new RandomRecommendForm(candidates.Count);
+        using var dialog = new RandomRecommendForm(candidateCount);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
         }
 
-        var targetCount = Math.Min(dialog.RecommendCount, candidates.Count);
-        var recommendedFolders = new List<FolderItem>();
-        var recommendedFolderIds = new HashSet<long>();
-        foreach (var candidate in candidates.OrderBy(_ => Random.Shared.Next()))
+        var allCandidates = database.GetFolders(
+            GetCurrentFolderListMode(),
+            GetCurrentSortMode(),
+            GetCurrentSearchField(),
+            searchBox.Text,
+            activeTagFilters,
+            excludedTagFilters,
+            tagFilterMode,
+            quickFilterMode);
+        var seriesNames = allCandidates
+            .Select(folder => folder.SeriesName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var seriesImageCounts = database.GetSeriesImageCounts(seriesNames);
+        var firstSeriesFolders = database.GetFirstFoldersInSeries(seriesNames);
+        var filteredCandidates = BuildRandomCandidates(allCandidates, seriesImageCounts, firstSeriesFolders, dialog.MinImageCount, dialog.MaxImageCount);
+        if (filteredCandidates.Count == 0)
         {
-            var displayFolder = GetRandomDisplayFolder(candidate);
-            if (!recommendedFolderIds.Add(displayFolder.Id))
-            {
-                continue;
-            }
-
-            recommendedFolders.Add(displayFolder);
-            if (recommendedFolders.Count >= targetCount)
-            {
-                break;
-            }
+            MessageBox.Show(this, "이미지 개수 조건에 맞는 랜덤 후보가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
         }
+
+        var targetCount = Math.Min(dialog.RecommendCount, filteredCandidates.Count);
+        var recommendedFolders = filteredCandidates
+            .OrderBy(_ => Random.Shared.Next())
+            .Take(targetCount)
+            .ToList();
 
         folders = recommendedFolders;
         randomFolders = folders;
+        totalFolderCount = folders.Count;
 
         suppressTabChanged = true;
         if (!tabs.TabPages.Contains(randomTabPage))
@@ -841,7 +1341,42 @@ public sealed class Form1 : Form
 
         selectedFolder = null;
         PopulateFolderList(null, autoSelectFirst: true);
-        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {candidates.Count}개";
+        var maxImageText = dialog.MaxImageCount is null ? "제한 없음" : dialog.MaxImageCount.Value.ToString("N0");
+        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {filteredCandidates.Count:N0}개 / 이미지 {dialog.MinImageCount:N0}-{maxImageText}";
+    }
+
+    private static List<FolderItem> BuildRandomCandidates(
+        IReadOnlyList<FolderItem> candidates,
+        IReadOnlyDictionary<string, int> seriesImageCounts,
+        IReadOnlyDictionary<string, FolderItem> firstSeriesFolders,
+        int minImageCount,
+        int? maxImageCount)
+    {
+        var result = new List<FolderItem>();
+        var addedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
+        {
+            var seriesName = candidate.SeriesName;
+            var imageCount = string.IsNullOrWhiteSpace(seriesName)
+                ? candidate.ImageCount
+                : seriesImageCounts.GetValueOrDefault(seriesName, candidate.ImageCount);
+            if (imageCount < minImageCount || (maxImageCount is not null && imageCount > maxImageCount.Value))
+            {
+                continue;
+            }
+
+            var key = string.IsNullOrWhiteSpace(seriesName) ? $"folder:{candidate.Id}" : $"series:{seriesName}";
+            if (!addedKeys.Add(key))
+            {
+                continue;
+            }
+
+            result.Add(!string.IsNullOrWhiteSpace(seriesName) && firstSeriesFolders.TryGetValue(seriesName, out var firstFolder)
+                ? firstFolder
+                : candidate);
+        }
+
+        return result;
     }
 
     private FolderItem GetRandomDisplayFolder(FolderItem folder)
@@ -873,6 +1408,9 @@ public sealed class Form1 : Form
         loadingDetails = true;
         selectedFolder = folder;
         SetDetailsEnabled(true);
+        deleteFolderButton.Text = Localization.T(GetCurrentFolderListMode() == FolderListMode.NewRegistration ? "폴더 삭제" : "DB에서 제거");
+        moveToMainRootButton.Visible = GetCurrentFolderListMode() == FolderListMode.NewRegistration;
+        moveToMainRootButton.Enabled = moveToMainRootButton.Visible;
         displayNameBox.Text = folder.DisplayName;
         authorBox.Text = folder.Author ?? "";
         numberBox.Text = folder.Number ?? "";
@@ -885,10 +1423,29 @@ public sealed class Form1 : Form
         favoriteCheckBox.Checked = folder.IsFavorite;
         reservedCheckBox.Checked = folder.IsReserved;
         var lastImageName = string.IsNullOrWhiteSpace(folder.LastImagePath) ? "-" : Path.GetFileName(folder.LastImagePath);
-        var seriesText = string.IsNullOrWhiteSpace(folder.SeriesName) ? "" : $" / 묶음: {folder.SeriesName} #{folder.SeriesOrder}";
-        statsLabel.Text = $"이미지 {folder.ImageCount}장 / 열람 {folder.ViewCount}회{seriesText}{Environment.NewLine}마지막 열람: {(folder.LastViewedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-")} / 마지막 이미지: {lastImageName}";
-        LoadThumbnailAsync(folder.ThumbnailPath);
+        var seriesText = GetSeriesStatsText(folder);
+        statsLabel.Text = string.Format(
+            Localization.T("detail.stats"),
+            folder.ImageCount,
+            folder.ViewCount,
+            seriesText,
+            folder.LastViewedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-",
+            lastImageName);
+        LoadThumbnailAsync(folder);
         loadingDetails = false;
+    }
+
+    private string GetSeriesStatsText(FolderItem folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder.SeriesName))
+        {
+            return "";
+        }
+
+        var orderText = folder.SeriesOrder?.ToString() ?? "-";
+        var maxOrder = database.GetSeriesMaxOrder(folder.SeriesName);
+        var maxOrderText = maxOrder <= 0 ? "-" : maxOrder.ToString();
+        return string.Format(Localization.T("detail.seriesStats"), folder.SeriesName, orderText, maxOrderText);
     }
 
     private void ClearDetails()
@@ -933,7 +1490,8 @@ public sealed class Form1 : Form
         statusLabel.Text = "저장됨";
         LoadTagFilters(selectedFolder.Tags);
         LoadSeriesNames();
-        LoadFolders(selectedFolder.Id);
+        RefreshFolderListItem(selectedFolder);
+        ShowFolder(selectedFolder);
     }
 
     private void OpenSelectedFolderInExplorer()
@@ -963,6 +1521,94 @@ public sealed class Form1 : Form
         statusLabel.Text = "경로 복사됨";
     }
 
+    private void MoveSelectedFolderToMainRoot()
+    {
+        if (selectedFolder is null)
+        {
+            return;
+        }
+
+        MoveFoldersToMainRoot([selectedFolder]);
+    }
+
+    private void MoveSelectedFoldersToMainRoot()
+    {
+        var selectedFolders = GetSelectedFolderItems();
+        if (selectedFolders.Count == 0)
+        {
+            return;
+        }
+
+        if (GetCurrentFolderListMode() != FolderListMode.NewRegistration)
+        {
+            MessageBox.Show(this, "메인 이동은 신규등록 탭에서만 사용할 수 있습니다.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        MoveFoldersToMainRoot(selectedFolders);
+    }
+
+    private void MoveFoldersToMainRoot(IReadOnlyList<FolderItem> targetFolders)
+    {
+        var movableFolders = targetFolders.Where(folder => Directory.Exists(folder.Path)).ToList();
+        if (movableFolders.Count == 0)
+        {
+            MessageBox.Show(this, "실제 폴더가 없어 이동할 수 없습니다.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var mainRoots = database.GetRoots(RootKind.Main).Where(Directory.Exists).ToList();
+        if (mainRoots.Count == 0)
+        {
+            MessageBox.Show(this, "이동할 메인 루트가 없습니다. 설정에서 메인 루트를 추가하세요.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var targetRoot = PromptRoot("메인으로 이동", "이동할 메인 루트", mainRoots);
+        if (string.IsNullOrWhiteSpace(targetRoot))
+        {
+            return;
+        }
+
+        var movePlans = movableFolders
+            .Select(folder => (Folder: folder, TargetPath: Path.Combine(targetRoot, new DirectoryInfo(folder.Path).Name)))
+            .ToList();
+        var conflicts = movePlans.Where(plan => Directory.Exists(plan.TargetPath) || File.Exists(plan.TargetPath)).ToList();
+        if (conflicts.Count > 0)
+        {
+            var preview = string.Join(Environment.NewLine, conflicts.Take(5).Select(plan => plan.TargetPath));
+            MessageBox.Show(this, $"대상 경로가 이미 존재하는 항목이 있어 이동을 중단합니다.\n\n{preview}", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var result = MessageBox.Show(this, $"선택한 폴더 {movePlans.Count}개를 메인 루트로 이동하고 DB 경로를 즉시 갱신합니다.\n\n대상: {targetRoot}", "메인으로 이동", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        var movedCount = 0;
+        try
+        {
+            foreach (var plan in movePlans)
+            {
+                var oldPath = plan.Folder.Path;
+                Directory.Move(oldPath, plan.TargetPath);
+                database.UpdatePathPrefix(oldPath, plan.TargetPath);
+                movedCount++;
+            }
+
+            statusLabel.Text = $"메인으로 이동됨: {movedCount}개";
+            ClearDetails();
+            LoadFolders(null, autoSelectFirst: false);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, $"{movedCount}개 이동 후 실패했습니다.\n\n{exception.Message}", "메인으로 이동 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            LoadFolders(null, autoSelectFirst: false);
+        }
+    }
+
     private void OpenViewer()
     {
         if (selectedFolder is null)
@@ -989,7 +1635,7 @@ public sealed class Form1 : Form
         using var viewer = new ImageViewerForm(images, 0, isSeriesViewer);
         viewer.ShowDialog(this);
         database.UpdateLastImagePath(selectedFolder.Id, viewer.CurrentImagePath);
-        LoadFolders(selectedFolder.Id);
+        RefreshFolderFromDatabase(selectedFolder.Id);
     }
 
     private bool ShouldOpenAsSeries(FolderItem folder)
@@ -1016,14 +1662,41 @@ public sealed class Form1 : Form
         selectedFolder.SeriesOrder = inputSeriesOrder;
         database.SaveFolder(selectedFolder);
         statusLabel.Text = "묶음 설정 저장됨";
-        LoadFolders(selectedFolder.Id);
+        RefreshFolderListItem(selectedFolder);
+        ShowFolder(selectedFolder);
         return selectedFolder is null;
+    }
+
+    private void RefreshFolderFromDatabase(long folderId)
+    {
+        var refreshedFolder = database.GetFolder(folderId);
+        if (refreshedFolder is null)
+        {
+            LoadFolders(null, autoSelectFirst: false);
+            return;
+        }
+
+        selectedFolder = refreshedFolder;
+        var folderIndex = folders.FindIndex(folder => folder.Id == refreshedFolder.Id);
+        if (folderIndex >= 0)
+        {
+            folders[folderIndex] = refreshedFolder;
+        }
+
+        RefreshFolderListItem(refreshedFolder);
+        ShowFolder(refreshedFolder);
     }
 
     private void DeleteSelectedFolder()
     {
         if (selectedFolder is null)
         {
+            return;
+        }
+
+        if (GetCurrentFolderListMode() == FolderListMode.NewRegistration)
+        {
+            DeleteSelectedFolderFromDisk();
             return;
         }
 
@@ -1044,6 +1717,45 @@ public sealed class Form1 : Form
         ClearDetails();
         LoadTagFilters();
         LoadFolders(null);
+    }
+
+    private void DeleteSelectedFolderFromDisk()
+    {
+        if (selectedFolder is null)
+        {
+            return;
+        }
+
+        var result = MessageBox.Show(
+            this,
+            $"신규등록 폴더를 실제로 휴지통으로 이동하고 DB에서 제거합니다.\n\n{selectedFolder.Path}",
+            "신규등록 폴더 삭제",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            if (Directory.Exists(selectedFolder.Path))
+            {
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+                    selectedFolder.Path,
+                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            }
+
+            database.DeleteFolder(selectedFolder.Id);
+            statusLabel.Text = $"신규등록 폴더 삭제됨: {selectedFolder.DisplayName}";
+            ClearDetails();
+            LoadFolders(null, autoSelectFirst: false);
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "폴더 삭제 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void ChooseThumbnail()
@@ -1077,11 +1789,11 @@ public sealed class Form1 : Form
         }
 
         selectedFolder.ThumbnailPath = dialog.FileName;
-        LoadThumbnailAsync(dialog.FileName);
+        LoadThumbnailAsync(selectedFolder);
         SaveSelectedFolder();
     }
 
-    private async void LoadThumbnailAsync(string? path)
+    private async void LoadThumbnailAsync(FolderItem folder)
     {
         thumbnailLoadCancellationTokenSource?.Cancel();
         thumbnailLoadCancellationTokenSource?.Dispose();
@@ -1090,42 +1802,85 @@ public sealed class Form1 : Form
 
         thumbnailBox.Image?.Dispose();
         thumbnailBox.Image = null;
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        var candidatePaths = GetThumbnailCandidatePaths(folder);
+        if (candidatePaths.Count == 0)
         {
             return;
         }
 
         try
         {
-            var image = await Task.Run(() =>
+            var result = await Task.Run(() =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-                using var sourceImage = Image.FromStream(stream);
-                return new Bitmap(sourceImage);
+                foreach (var candidatePath in candidatePaths)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (!File.Exists(candidatePath))
+                    {
+                        ImageLoader.LogFailure("thumbnail", ImageLoader.CreateFailure(candidatePath, "파일 없음"));
+                        continue;
+                    }
+
+                    try
+                    {
+                        return new ThumbnailLoadResult(ImageLoader.LoadBitmapCopy(candidatePath), candidatePath);
+                    }
+                    catch (Exception exception)
+                    {
+                        ImageLoader.LogFailure("thumbnail", ImageLoader.CreateFailure(candidatePath, exception));
+                    }
+                }
+
+                return null;
             }, cancellationToken);
 
             if (cancellationToken.IsCancellationRequested)
             {
-                image.Dispose();
+                result?.Image.Dispose();
                 return;
             }
 
             thumbnailBox.Image?.Dispose();
-            thumbnailBox.Image = image;
+            thumbnailBox.Image = result?.Image;
         }
         catch (OperationCanceledException)
         {
         }
-        catch
+        catch (Exception exception)
         {
+            ImageLoader.LogFailure("thumbnail", ImageLoader.CreateFailure(folder.ThumbnailPath ?? folder.Path, exception));
             thumbnailBox.Image = null;
         }
     }
 
+    private List<string> GetThumbnailCandidatePaths(FolderItem folder)
+    {
+        var paths = new List<string>();
+        if (!string.IsNullOrWhiteSpace(folder.ThumbnailPath))
+        {
+            paths.Add(folder.ThumbnailPath);
+        }
+
+        try
+        {
+            paths.AddRange(database.GetImages(folder.Id).Select(image => image.Path));
+        }
+        catch (Exception exception)
+        {
+            ImageLoader.LogFailure("thumbnail", ImageLoader.CreateFailure(folder.Path, exception));
+        }
+
+        return paths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private sealed record ThumbnailLoadResult(Image Image, string Path);
+
     private void SetDetailsEnabled(bool enabled)
     {
-        foreach (var control in new Control[] { displayNameBox, authorBox, numberBox, seriesNameBox, seriesOrderBox, scoreBox, tagsBox, memoBox, favoriteCheckBox, reservedCheckBox, saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, deleteFolderButton })
+        foreach (var control in new Control[] { displayNameBox, authorBox, numberBox, seriesNameBox, seriesOrderBox, scoreBox, tagsBox, memoBox, favoriteCheckBox, reservedCheckBox, saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton })
         {
             control.Enabled = enabled;
         }
@@ -1134,15 +1889,22 @@ public sealed class Form1 : Form
     private void SetBusy(bool busy)
     {
         scanButton.Enabled = !busy;
+        fullScanButton.Enabled = !busy;
         randomButton.Enabled = !busy;
         searchBox.Enabled = !busy;
         searchFieldComboBox.Enabled = !busy;
         sortComboBox.Enabled = !busy;
         quickFilterComboBox.Enabled = !busy;
         tagFilterButton.Enabled = !busy;
+        excludedTagFilterButton.Enabled = !busy;
         tagFilterModeComboBox.Enabled = !busy;
         clearTagFilterButton.Enabled = !busy;
         folderList.Enabled = !busy;
+        firstPageButton.Enabled = !busy && currentPageIndex > 0;
+        previousPageButton.Enabled = !busy && currentPageIndex > 0;
+        nextPageButton.Enabled = !busy && currentPageIndex < GetLastPageIndex();
+        lastPageButton.Enabled = !busy && currentPageIndex < GetLastPageIndex();
+        pageSizeComboBox.Enabled = !busy;
     }
 
     private void SaveScanLog(ScanLog scanLog)
@@ -1163,15 +1925,19 @@ public sealed class Form1 : Form
         var tags = database.GetTags();
 
         activeTagFilters.RemoveAll(activeTag => !tags.Contains(activeTag, StringComparer.OrdinalIgnoreCase));
+        excludedTagFilters.RemoveAll(excludedTag => !tags.Contains(excludedTag, StringComparer.OrdinalIgnoreCase));
 
         updatingTagFilterListBox = true;
         tagFilterListBox.Items.Clear();
+        excludedTagFilterListBox.Items.Clear();
         foreach (var tag in tags)
         {
             tagFilterListBox.Items.Add(tag, activeTagFilters.Contains(tag, StringComparer.OrdinalIgnoreCase));
+            excludedTagFilterListBox.Items.Add(tag, excludedTagFilters.Contains(tag, StringComparer.OrdinalIgnoreCase));
         }
         updatingTagFilterListBox = false;
         ResizeTagFilterDropDown();
+        ResizeExcludedTagFilterDropDown();
 
         UpdateTagFilterStatus();
     }
@@ -1478,6 +2244,12 @@ public sealed class Form1 : Form
             return;
         }
 
+        if (GetCurrentFolderListMode() == FolderListMode.NewRegistration)
+        {
+            DeleteSelectedFoldersFromDisk(selectedFolders);
+            return;
+        }
+
         var result = MessageBox.Show(
             this,
             $"선택한 {selectedFolders.Count}개 폴더를 DB 목록에서만 제거합니다. 실제 파일은 삭제하지 않습니다.",
@@ -1496,6 +2268,56 @@ public sealed class Form1 : Form
         statusLabel.Text = $"선택 {selectedFolders.Count}개 DB에서 제거됨";
     }
 
+    private void DeleteSelectedFoldersFromDisk(IReadOnlyList<FolderItem> selectedFolders)
+    {
+        var result = MessageBox.Show(
+            this,
+            $"선택한 신규등록 폴더 {selectedFolders.Count}개를 실제로 휴지통으로 이동하고 DB에서 제거합니다.",
+            "신규등록 폴더 삭제",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        var deletedIds = new List<long>();
+        var failedMessages = new List<string>();
+        foreach (var folder in selectedFolders)
+        {
+            try
+            {
+                if (Directory.Exists(folder.Path))
+                {
+                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+                        folder.Path,
+                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                }
+
+                deletedIds.Add(folder.Id);
+            }
+            catch (Exception exception)
+            {
+                failedMessages.Add($"{folder.DisplayName}: {exception.Message}");
+            }
+        }
+
+        if (deletedIds.Count > 0)
+        {
+            database.DeleteFolders(deletedIds);
+        }
+
+        ClearDetails();
+        LoadTagFilters();
+        LoadFolders(null, autoSelectFirst: false);
+        statusLabel.Text = $"신규등록 폴더 삭제됨: {deletedIds.Count}개";
+        if (failedMessages.Count > 0)
+        {
+            MessageBox.Show(this, string.Join(Environment.NewLine, failedMessages.Take(8)), "일부 폴더 삭제 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
     private void ShowTagFilterMenu()
     {
         if (tagFilterListBox.Items.Count == 0)
@@ -1508,6 +2330,21 @@ public sealed class Form1 : Form
             ResizeTagFilterDropDown();
             tagFilterDropDown.Show(tagFilterButton, new Point(0, tagFilterButton.Height));
             tagFilterListBox.Focus();
+        }
+    }
+
+    private void ShowExcludedTagFilterMenu()
+    {
+        if (excludedTagFilterListBox.Items.Count == 0)
+        {
+            return;
+        }
+
+        if (!excludedTagFilterDropDown.Visible)
+        {
+            ResizeExcludedTagFilterDropDown();
+            excludedTagFilterDropDown.Show(excludedTagFilterButton, new Point(0, excludedTagFilterButton.Height));
+            excludedTagFilterListBox.Focus();
         }
     }
 
@@ -1531,13 +2368,35 @@ public sealed class Form1 : Form
         LoadFolders();
     }
 
+    private void SyncExcludedTagFiltersFromListBox()
+    {
+        if (updatingTagFilterListBox)
+        {
+            return;
+        }
+
+        excludedTagFilters.Clear();
+        foreach (var checkedItem in excludedTagFilterListBox.CheckedItems)
+        {
+            if (checkedItem is string tag)
+            {
+                excludedTagFilters.Add(tag);
+            }
+        }
+
+        UpdateTagFilterStatus();
+        LoadFolders();
+    }
+
     private void ClearTagFilter()
     {
         activeTagFilters.Clear();
+        excludedTagFilters.Clear();
         updatingTagFilterListBox = true;
         for (var itemIndex = 0; itemIndex < tagFilterListBox.Items.Count; itemIndex++)
         {
             tagFilterListBox.SetItemChecked(itemIndex, false);
+            excludedTagFilterListBox.SetItemChecked(itemIndex, false);
         }
         updatingTagFilterListBox = false;
         UpdateTagFilterStatus();
@@ -1545,29 +2404,88 @@ public sealed class Form1 : Form
         MoveFocusAwayFromTagFilter();
     }
 
+    private void ToggleAllActiveTagFilters()
+    {
+        var checkAll = tagFilterListBox.CheckedItems.Count < tagFilterListBox.Items.Count;
+        updatingTagFilterListBox = true;
+        for (var itemIndex = 0; itemIndex < tagFilterListBox.Items.Count; itemIndex++)
+        {
+            tagFilterListBox.SetItemChecked(itemIndex, checkAll);
+        }
+
+        BeginInvoke(() =>
+        {
+            updatingTagFilterListBox = false;
+            SyncActiveTagFiltersFromListBox();
+        });
+    }
+
+    private void ToggleAllExcludedTagFilters()
+    {
+        var checkAll = excludedTagFilterListBox.CheckedItems.Count < excludedTagFilterListBox.Items.Count;
+        updatingTagFilterListBox = true;
+        for (var itemIndex = 0; itemIndex < excludedTagFilterListBox.Items.Count; itemIndex++)
+        {
+            excludedTagFilterListBox.SetItemChecked(itemIndex, checkAll);
+        }
+
+        BeginInvoke(() =>
+        {
+            updatingTagFilterListBox = false;
+            SyncExcludedTagFiltersFromListBox();
+        });
+    }
+
     private void UpdateTagFilterStatus()
     {
-        if (activeTagFilters.Count == 0)
+        if (activeTagFilters.Count == 0 && excludedTagFilters.Count == 0)
         {
             tagFilterStatusLabel.Text = "";
-            tagFilterButton.Text = "태그";
+            tagFilterButton.Text = Localization.T("toolbar.tag");
+            excludedTagFilterButton.Text = Localization.T("toolbar.excludedTag");
             tagFilterButton.Font = Font;
+            excludedTagFilterButton.Font = Font;
             tagFilterButton.ForeColor = SystemColors.ControlText;
+            excludedTagFilterButton.ForeColor = SystemColors.ControlText;
             toolTip.SetToolTip(clearTagFilterButton, "태그 필터를 모두 비우고 전체 목록을 표시합니다.");
+            UpdateTagFilterToggleButtons();
             return;
         }
 
         var tagSummary = string.Join(", ", activeTagFilters);
-        var modeText = tagFilterModeComboBox.SelectedIndex == 1 ? "OR" : "AND";
-        tagFilterButton.Text = ShortenTagSummary(tagSummary);
-        tagFilterButton.Font = new Font(Font, FontStyle.Bold);
-        tagFilterButton.ForeColor = Color.FromArgb(25, 90, 170);
-        tagFilterStatusLabel.Text = $"태그 필터({modeText}): {tagSummary}";
-        toolTip.SetToolTip(clearTagFilterButton, $"현재 태그 필터({modeText}): {tagSummary}");
+        var excludedTagSummary = string.Join(", ", excludedTagFilters);
+        var modeText = tagFilterModeComboBox.SelectedIndex switch
+        {
+            1 => "AND",
+            2 => "OR",
+            _ => "포함"
+        };
+        tagFilterButton.Text = activeTagFilters.Count == 0 ? Localization.T("toolbar.tag") : ShortenTagSummary(tagSummary);
+        excludedTagFilterButton.Text = excludedTagFilters.Count == 0 ? Localization.T("toolbar.excludedTag") : ShortenTagSummary(excludedTagSummary);
+        tagFilterButton.Font = activeTagFilters.Count == 0 ? Font : new Font(Font, FontStyle.Bold);
+        excludedTagFilterButton.Font = excludedTagFilters.Count == 0 ? Font : new Font(Font, FontStyle.Bold);
+        tagFilterButton.ForeColor = activeTagFilters.Count == 0 ? SystemColors.ControlText : Color.FromArgb(25, 90, 170);
+        excludedTagFilterButton.ForeColor = excludedTagFilters.Count == 0 ? SystemColors.ControlText : Color.FromArgb(180, 60, 45);
+        var includeText = activeTagFilters.Count == 0 ? "포함 없음" : $"포함({modeText}): {tagSummary}";
+        var excludeText = excludedTagFilters.Count == 0 ? "제외 없음" : $"제외: {excludedTagSummary}";
+        tagFilterStatusLabel.Text = $"태그 필터 - {includeText} / {excludeText}";
+        toolTip.SetToolTip(clearTagFilterButton, $"현재 태그 필터 - {includeText} / {excludeText}");
+        UpdateTagFilterToggleButtons();
+    }
+
+    private void UpdateTagFilterToggleButtons()
+    {
+        toggleAllTagFilterButton.Text = tagFilterListBox.CheckedItems.Count < tagFilterListBox.Items.Count ? "전체 선택" : "전체 해제";
+        toggleAllExcludedTagFilterButton.Text = excludedTagFilterListBox.CheckedItems.Count < excludedTagFilterListBox.Items.Count ? "전체 선택" : "전체 해제";
     }
 
     private void BuildTagFilterDropDown()
     {
+        toggleAllTagFilterButton.Text = "전체 선택";
+        toggleAllTagFilterButton.Dock = DockStyle.Top;
+        toggleAllTagFilterButton.Height = 28;
+        toggleAllTagFilterButton.Click += (_, _) => ToggleAllActiveTagFilters();
+
         tagFilterListBox.CheckOnClick = true;
         tagFilterListBox.BorderStyle = BorderStyle.None;
         tagFilterListBox.IntegralHeight = false;
@@ -1583,7 +2501,11 @@ public sealed class Form1 : Form
             }
         };
 
-        var host = new ToolStripControlHost(tagFilterListBox)
+        var panel = new Panel();
+        panel.Controls.Add(tagFilterListBox);
+        panel.Controls.Add(toggleAllTagFilterButton);
+
+        var host = new ToolStripControlHost(panel)
         {
             Margin = Padding.Empty,
             Padding = Padding.Empty,
@@ -1594,23 +2516,87 @@ public sealed class Form1 : Form
         tagFilterDropDown.AutoClose = true;
     }
 
+    private void BuildExcludedTagFilterDropDown()
+    {
+        toggleAllExcludedTagFilterButton.Text = "전체 선택";
+        toggleAllExcludedTagFilterButton.Dock = DockStyle.Top;
+        toggleAllExcludedTagFilterButton.Height = 28;
+        toggleAllExcludedTagFilterButton.Click += (_, _) => ToggleAllExcludedTagFilters();
+
+        excludedTagFilterListBox.CheckOnClick = true;
+        excludedTagFilterListBox.BorderStyle = BorderStyle.None;
+        excludedTagFilterListBox.IntegralHeight = false;
+        excludedTagFilterListBox.HorizontalScrollbar = true;
+        excludedTagFilterListBox.ItemCheck += (_, _) => BeginInvoke(SyncExcludedTagFiltersFromListBox);
+        excludedTagFilterListBox.KeyDown += (_, keyEventArgs) =>
+        {
+            if (keyEventArgs.KeyCode == Keys.Escape)
+            {
+                MoveFocusAwayFromTagFilter();
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+        };
+
+        var panel = new Panel();
+        panel.Controls.Add(excludedTagFilterListBox);
+        panel.Controls.Add(toggleAllExcludedTagFilterButton);
+
+        var host = new ToolStripControlHost(panel)
+        {
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            AutoSize = false
+        };
+        excludedTagFilterDropDown.Padding = Padding.Empty;
+        excludedTagFilterDropDown.Items.Add(host);
+        excludedTagFilterDropDown.AutoClose = true;
+    }
+
     private void ResizeTagFilterDropDown()
     {
         var visibleItemCount = Math.Clamp(tagFilterListBox.Items.Count, 1, 10);
         var itemHeight = Math.Max(tagFilterListBox.ItemHeight, 18);
         var width = Math.Max(tagFilterButton.Width, 160);
-        var height = visibleItemCount * itemHeight + 6;
+        var listHeight = visibleItemCount * itemHeight + 6;
+        var height = listHeight + toggleAllTagFilterButton.Height;
 
-        tagFilterListBox.Size = new Size(width, height);
+        toggleAllTagFilterButton.Width = width;
+        tagFilterListBox.Location = new Point(0, toggleAllTagFilterButton.Height);
+        tagFilterListBox.Size = new Size(width, listHeight);
         if (tagFilterDropDown.Items[0] is ToolStripControlHost host)
         {
-            host.Size = tagFilterListBox.Size;
+            host.Size = new Size(width, height);
+            host.Control.Size = host.Size;
         }
+
+        UpdateTagFilterToggleButtons();
+    }
+
+    private void ResizeExcludedTagFilterDropDown()
+    {
+        var visibleItemCount = Math.Clamp(excludedTagFilterListBox.Items.Count, 1, 10);
+        var itemHeight = Math.Max(excludedTagFilterListBox.ItemHeight, 18);
+        var width = Math.Max(excludedTagFilterButton.Width, 160);
+        var listHeight = visibleItemCount * itemHeight + 6;
+        var height = listHeight + toggleAllExcludedTagFilterButton.Height;
+
+        toggleAllExcludedTagFilterButton.Width = width;
+        excludedTagFilterListBox.Location = new Point(0, toggleAllExcludedTagFilterButton.Height);
+        excludedTagFilterListBox.Size = new Size(width, listHeight);
+        if (excludedTagFilterDropDown.Items[0] is ToolStripControlHost host)
+        {
+            host.Size = new Size(width, height);
+            host.Control.Size = host.Size;
+        }
+
+        UpdateTagFilterToggleButtons();
     }
 
     private void MoveFocusAwayFromTagFilter()
     {
         tagFilterDropDown.Close();
+        excludedTagFilterDropDown.Close();
 
         if (folderList.Items.Count > 0)
         {
@@ -1639,9 +2625,51 @@ public sealed class Form1 : Form
 
     private void RefreshAfterSettingsChanged()
     {
+        ApplyLocalization();
         LoadTagFilters();
         LoadFolders(selectedFolder?.Id);
         statusLabel.Text = "설정 변경사항을 반영했습니다.";
+    }
+
+    private void ApplyLocalization()
+    {
+        applyingLocalization = true;
+        try
+        {
+            Localization.ApplyTo(this, toolTip);
+            Text = Localization.T("app.title");
+            if (MainMenuStrip?.Items.Count >= 2)
+            {
+                MainMenuStrip.Items[0].Text = Localization.T("menu.settings");
+                MainMenuStrip.Items[1].Text = Localization.T("menu.random");
+            }
+
+            scanButton.Text = Localization.T("toolbar.quickSync");
+            fullScanButton.Text = Localization.T("toolbar.fullScan");
+            randomButton.Text = Localization.T("toolbar.random");
+            searchBox.PlaceholderText = Localization.T("toolbar.search");
+            tagFilterButton.Text = activeTagFilters.Count == 0 ? Localization.T("toolbar.tag") : tagFilterButton.Text;
+            excludedTagFilterButton.Text = excludedTagFilters.Count == 0 ? Localization.T("toolbar.excludedTag") : excludedTagFilterButton.Text;
+            clearTagFilterButton.Text = Localization.T("toolbar.clear");
+            if (tabs.TabPages.Count >= 6)
+            {
+                tabs.TabPages[0].Text = Localization.T("tabs.all");
+                tabs.TabPages[1].Text = Localization.T("tabs.favorites");
+                tabs.TabPages[2].Text = Localization.T("tabs.recent");
+                tabs.TabPages[3].Text = Localization.T("tabs.reserved");
+                tabs.TabPages[4].Text = Localization.T("tabs.series");
+                tabs.TabPages[5].Text = Localization.T("tabs.newRegistration");
+            }
+
+            randomTabPage.Text = Localization.T("menu.random");
+        }
+        finally
+        {
+            applyingLocalization = false;
+        }
+
+        UpdateTagFilterStatus();
+        UpdateListStatus();
     }
 
     private void StyleDetailButton(Button button, string description)
@@ -1701,7 +2729,7 @@ public sealed class Form1 : Form
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft
+            FlowDirection = FlowDirection.LeftToRight
         };
         var okButton = new Button
         {
@@ -1725,6 +2753,63 @@ public sealed class Form1 : Form
         dialog.CancelButton = cancelButton;
 
         return dialog.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+    }
+
+    private static string? PromptRoot(string title, string label, IReadOnlyList<string> roots)
+    {
+        using var dialog = new Form
+        {
+            Text = title,
+            Width = 620,
+            Height = 170,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false
+        };
+
+        var table = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 3,
+            ColumnCount = 1
+        };
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+
+        var labelControl = new Label
+        {
+            Text = label,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        var comboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList
+        };
+        comboBox.Items.AddRange(roots.Cast<object>().ToArray());
+        comboBox.SelectedIndex = 0;
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight
+        };
+        var okButton = new Button { Text = "확인", DialogResult = DialogResult.OK, Width = 80 };
+        var cancelButton = new Button { Text = "취소", DialogResult = DialogResult.Cancel, Width = 80 };
+
+        buttons.Controls.AddRange([okButton, cancelButton]);
+        table.Controls.Add(labelControl, 0, 0);
+        table.Controls.Add(comboBox, 0, 1);
+        table.Controls.Add(buttons, 0, 2);
+        dialog.Controls.Add(table);
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+
+        return dialog.ShowDialog() == DialogResult.OK ? comboBox.SelectedItem?.ToString() : null;
     }
 
 }

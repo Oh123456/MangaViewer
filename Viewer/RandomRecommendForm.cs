@@ -3,15 +3,20 @@ namespace Viewer;
 public sealed class RandomRecommendForm : Form
 {
     private readonly NumericUpDown countBox = new();
+    private readonly NumericUpDown minImageCountBox = new();
+    private readonly NumericUpDown maxImageCountBox = new();
 
     public int RecommendCount => (int)countBox.Value;
+    public int MinImageCount => (int)minImageCountBox.Value;
+    public int? MaxImageCount => maxImageCountBox.Value <= 0 ? null : (int)maxImageCountBox.Value;
 
     public RandomRecommendForm(int maxCount)
     {
         Text = "랜덤 추천";
-        Width = 320;
-        Height = 160;
-        MinimumSize = new Size(300, 150);
+        AppIcons.ApplyTo(this);
+        Width = 360;
+        Height = 230;
+        MinimumSize = new Size(340, 220);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
@@ -21,13 +26,15 @@ public sealed class RandomRecommendForm : Form
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
-            RowCount = 3,
+            RowCount = 5,
             ColumnCount = 2
         };
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
         var countLabel = new Label
@@ -42,9 +49,31 @@ public sealed class RandomRecommendForm : Form
         countBox.Value = Math.Min(10, Math.Max(1, maxCount));
         countBox.Dock = DockStyle.Fill;
 
+        var minImageCountLabel = new Label
+        {
+            Text = "최소 이미지",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        minImageCountBox.Minimum = 0;
+        minImageCountBox.Maximum = 1_000_000;
+        minImageCountBox.Value = 0;
+        minImageCountBox.Dock = DockStyle.Fill;
+
+        var maxImageCountLabel = new Label
+        {
+            Text = "최대 이미지",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        maxImageCountBox.Minimum = 0;
+        maxImageCountBox.Maximum = 1_000_000;
+        maxImageCountBox.Value = 0;
+        maxImageCountBox.Dock = DockStyle.Fill;
+
         var hintLabel = new Label
         {
-            Text = $"현재 목록 후보: {maxCount}개",
+            Text = string.Format(Localization.T("현재 목록 후보: {0}개 / 최대 0은 제한 없음"), maxCount),
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft
         };
@@ -52,7 +81,7 @@ public sealed class RandomRecommendForm : Form
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft
+            FlowDirection = FlowDirection.LeftToRight
         };
 
         var okButton = new Button
@@ -71,10 +100,15 @@ public sealed class RandomRecommendForm : Form
         buttons.Controls.AddRange([okButton, cancelButton]);
         root.Controls.Add(countLabel, 0, 0);
         root.Controls.Add(countBox, 1, 0);
-        root.Controls.Add(hintLabel, 1, 1);
-        root.Controls.Add(buttons, 0, 2);
+        root.Controls.Add(minImageCountLabel, 0, 1);
+        root.Controls.Add(minImageCountBox, 1, 1);
+        root.Controls.Add(maxImageCountLabel, 0, 2);
+        root.Controls.Add(maxImageCountBox, 1, 2);
+        root.Controls.Add(hintLabel, 1, 3);
+        root.Controls.Add(buttons, 0, 4);
         root.SetColumnSpan(buttons, 2);
         Controls.Add(root);
+        Localization.ApplyTo(this);
 
         AcceptButton = okButton;
         CancelButton = cancelButton;

@@ -6,12 +6,16 @@ public sealed class ScanProgressForm : Form
     private readonly ProgressBar progressBar = new();
     private readonly Button cancelButton = new();
     private readonly Action cancelScan;
+    private readonly System.Diagnostics.Stopwatch elapsedStopwatch = new();
+    private readonly System.Windows.Forms.Timer elapsedTimer = new();
+    private string currentStatus = Localization.T("스캔 준비 중...");
 
     public ScanProgressForm(Action cancelScan)
     {
         this.cancelScan = cancelScan;
 
         Text = "스캔 중";
+        AppIcons.ApplyTo(this);
         Width = 460;
         Height = 175;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -20,6 +24,16 @@ public sealed class ScanProgressForm : Form
         MinimizeBox = false;
 
         BuildUi();
+        Localization.ApplyTo(this);
+        elapsedTimer.Interval = 1000;
+        elapsedTimer.Tick += (_, _) => RefreshStatusText();
+        elapsedStopwatch.Start();
+        elapsedTimer.Start();
+        FormClosed += (_, _) =>
+        {
+            elapsedTimer.Stop();
+            elapsedTimer.Dispose();
+        };
     }
 
     public void UpdateStatus(string text)
@@ -29,7 +43,8 @@ public sealed class ScanProgressForm : Form
             return;
         }
 
-        statusLabel.Text = text;
+        currentStatus = Localization.T(text);
+        RefreshStatusText();
     }
 
     private void BuildUi()
@@ -46,7 +61,7 @@ public sealed class ScanProgressForm : Form
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
 
         statusLabel.Dock = DockStyle.Fill;
-        statusLabel.Text = "스캔 준비 중...";
+        statusLabel.Text = currentStatus;
         statusLabel.TextAlign = ContentAlignment.MiddleLeft;
 
         progressBar.Dock = DockStyle.Fill;
@@ -65,7 +80,7 @@ public sealed class ScanProgressForm : Form
         cancelButton.Click += (_, _) =>
         {
             cancelButton.Enabled = false;
-            statusLabel.Text = "취소 요청 중...";
+            UpdateStatus(Localization.T("취소 요청 중..."));
             cancelScan();
         };
         buttonPanel.Controls.Add(cancelButton);
@@ -74,5 +89,17 @@ public sealed class ScanProgressForm : Form
         root.Controls.Add(progressBar, 0, 1);
         root.Controls.Add(buttonPanel, 0, 2);
         Controls.Add(root);
+    }
+
+    private void RefreshStatusText()
+    {
+        var elapsedText = elapsedStopwatch.Elapsed.ToString(@"hh\:mm\:ss");
+        statusLabel.Text = $"{currentStatus} / {Localization.T("경과")} {elapsedText}";
+    }
+
+    protected override void OnShown(EventArgs eventArgs)
+    {
+        base.OnShown(eventArgs);
+        Text = Localization.T(Text);
     }
 }

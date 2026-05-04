@@ -44,6 +44,7 @@ public sealed class ImageViewerForm : Form
         index = Math.Clamp(startIndex, 0, Math.Max(0, imageItems.Count - 1));
 
         Text = "이미지 뷰어";
+        AppIcons.ApplyTo(this);
         Width = 1200;
         Height = 800;
         KeyPreview = true;
@@ -168,10 +169,10 @@ public sealed class ImageViewerForm : Form
         pictureBox.Dock = DockStyle.Fill;
         pictureBox.BackColor = Color.FromArgb(20, 20, 20);
         pictureBox.SizeMode = PictureBoxSizeMode.Zoom;
-        pictureBox.DoubleClick += (_, _) => ToggleFullscreen();
 
         Controls.Add(pictureBox);
         Controls.Add(toolbar);
+        Localization.ApplyTo(this);
 
         KeyDown += OnKeyDown;
         MouseWheel += (_, mouseEventArgs) => MoveImage(mouseEventArgs.Delta < 0 ? 1 : -1);
@@ -226,21 +227,25 @@ public sealed class ImageViewerForm : Form
         }
         else if (keyEventArgs.KeyCode == Keys.Escape)
         {
-            if (isFullscreen)
-            {
-                ToggleFullscreen();
-            }
-            else
-            {
-                Close();
-            }
-
+            Close();
             keyEventArgs.Handled = true;
         }
     }
 
     protected override bool ProcessCmdKey(ref Message message, Keys keyData)
     {
+        if (keyData == Keys.F11)
+        {
+            ToggleFullscreen();
+            return true;
+        }
+
+        if (keyData == Keys.Escape)
+        {
+            Close();
+            return true;
+        }
+
         if (pageBox.ContainsFocus)
         {
             if (keyData == Keys.Enter)
@@ -261,12 +266,6 @@ public sealed class ImageViewerForm : Form
         if (keyData is Keys.Right or Keys.PageDown or Keys.Space or Keys.Enter)
         {
             MoveImage(1);
-            return true;
-        }
-
-        if (keyData == Keys.F11)
-        {
-            ToggleFullscreen();
             return true;
         }
 
@@ -369,22 +368,22 @@ public sealed class ImageViewerForm : Form
 
         if (images.Count == 0)
         {
-            statusLabel.Text = "이미지가 없습니다.";
+            statusLabel.Text = Localization.T("이미지가 없습니다.");
             return;
         }
 
         var image = images[index];
         try
         {
-            using var stream = new FileStream(image.Path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            currentImage = Image.FromStream(stream);
+            currentImage = ImageLoader.LoadBitmapCopy(image.Path);
             pictureBox.Image = currentImage;
             var folderPositionText = GetFolderPositionText(image);
             statusLabel.Text = $"{folderPositionText}{image.FileName}  {currentImage.Width}x{currentImage.Height}";
         }
         catch (Exception exception)
         {
-            statusLabel.Text = $"이미지를 열 수 없습니다: {exception.Message}";
+            ImageLoader.LogFailure("image_load", ImageLoader.CreateFailure(image.Path, exception));
+            statusLabel.Text = $"{Localization.T("이미지를 열 수 없습니다")}: {exception.Message}";
         }
 
         previousButton.Enabled = index > 0;
@@ -428,7 +427,7 @@ public sealed class ImageViewerForm : Form
         }
 
         var title = string.IsNullOrWhiteSpace(image.FolderDisplayName) ? "" : $"{image.FolderDisplayName}  ";
-        return $"{folderIndex + 1}/{folderOrder.Count}편  {title}";
+        return $"{folderIndex + 1}/{folderOrder.Count}{Localization.T("편")}  {title}";
     }
 
     private void ApplySizeMode()
@@ -460,11 +459,13 @@ public sealed class ImageViewerForm : Form
         {
             previousBorderStyle = FormBorderStyle;
             previousWindowState = WindowState;
-            previousBounds = Bounds;
+            previousBounds = WindowState == FormWindowState.Normal ? Bounds : RestoreBounds;
+            var screenBounds = Screen.FromControl(this).Bounds;
             FormBorderStyle = FormBorderStyle.None;
-            WindowState = FormWindowState.Maximized;
+            WindowState = FormWindowState.Normal;
+            Bounds = screenBounds;
             TopMost = true;
-            fullscreenButton.Text = "창모드";
+            fullscreenButton.Text = Localization.T("창모드");
             isFullscreen = true;
             lastFullscreen = true;
             AppSettings.Current.ViewerFullscreen = true;
@@ -481,7 +482,7 @@ public sealed class ImageViewerForm : Form
             Bounds = previousBounds;
         }
 
-        fullscreenButton.Text = "전체화면";
+        fullscreenButton.Text = Localization.T("전체화면");
         isFullscreen = false;
         lastFullscreen = false;
         AppSettings.Current.ViewerFullscreen = false;

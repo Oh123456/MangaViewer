@@ -24,6 +24,7 @@ public sealed class AppDatabase
             CREATE TABLE IF NOT EXISTS Roots (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 Path TEXT NOT NULL UNIQUE,
+                Kind TEXT NOT NULL DEFAULT 'Main',
                 CreatedAt TEXT NOT NULL
             );
 
@@ -42,10 +43,13 @@ public sealed class AppDatabase
                 ViewCount INTEGER NOT NULL DEFAULT 0,
                 LastViewedAt TEXT NULL,
                 LastImagePath TEXT NULL,
+                DirectoryModifiedAt TEXT NULL,
                 FolderModifiedAt TEXT NULL,
                 ImageCount INTEGER NOT NULL DEFAULT 0,
                 TotalImageBytes INTEGER NOT NULL DEFAULT 0,
                 ThumbnailPath TEXT NULL,
+                PathExists INTEGER NOT NULL DEFAULT 1,
+                PathCheckedAt TEXT NULL,
                 CreatedAt TEXT NOT NULL,
                 UpdatedAt TEXT NOT NULL
             );
@@ -75,22 +79,34 @@ public sealed class AppDatabase
             );
             """;
         command.ExecuteNonQuery();
+        EnsureColumn(connection, "Roots", "Kind", "TEXT NOT NULL DEFAULT 'Main'");
         EnsureColumn(connection, "Folders", "LastImagePath", "TEXT NULL");
         EnsureColumn(connection, "Folders", "IsReserved", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "SeriesName", "TEXT NULL");
         EnsureColumn(connection, "Folders", "SeriesOrder", "INTEGER NULL");
+        EnsureColumn(connection, "Folders", "DirectoryModifiedAt", "TEXT NULL");
         EnsureColumn(connection, "Folders", "FolderModifiedAt", "TEXT NULL");
         EnsureColumn(connection, "Folders", "ImageCount", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "TotalImageBytes", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "Folders", "PathExists", "INTEGER NOT NULL DEFAULT 1");
+        EnsureColumn(connection, "Folders", "PathCheckedAt", "TEXT NULL");
+        EnsureIndexes(connection);
         BackfillFolderModifiedAt(connection);
         BackfillFolderScanStats(connection);
     }
 
-    public List<string> GetRoots()
+    public List<string> GetRoots(RootKind? kind = null)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Path FROM Roots ORDER BY Path;";
+        command.CommandText = kind is null
+            ? "SELECT Path FROM Roots ORDER BY Kind, Path;"
+            : "SELECT Path FROM Roots WHERE Kind = $kind ORDER BY Path;";
+        if (kind is not null)
+        {
+            command.Parameters.AddWithValue("$kind", ToRootKind(kind.Value));
+        }
+
         using var reader = command.ExecuteReader();
         var roots = new List<string>();
         while (reader.Read())
@@ -101,15 +117,16 @@ public sealed class AppDatabase
         return roots;
     }
 
-    public void AddRoot(string path)
+    public void AddRoot(string path, RootKind kind = RootKind.Main)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT OR IGNORE INTO Roots (Path, CreatedAt)
-            VALUES ($path, $createdAt);
+            INSERT OR IGNORE INTO Roots (Path, Kind, CreatedAt)
+            VALUES ($path, $kind, $createdAt);
             """;
         command.Parameters.AddWithValue("$path", path);
+        command.Parameters.AddWithValue("$kind", ToRootKind(kind));
         command.Parameters.AddWithValue("$createdAt", ToDb(DateTime.Now));
         command.ExecuteNonQuery();
     }
@@ -130,23 +147,49 @@ public sealed class AppDatabase
         transaction.Commit();
     }
 
+    public void RenameRootPath(string oldPath, string newPath)
+    {
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = "UPDATE Roots SET Path = $newPath WHERE Path = $oldPath;";
+            command.Parameters.AddWithValue("$oldPath", oldPath);
+            command.Parameters.AddWithValue("$newPath", newPath);
+            command.ExecuteNonQuery();
+        }
+
+        UpdatePathPrefix(connection, transaction, oldPath, newPath);
+        transaction.Commit();
+    }
+
+    public void UpdatePathPrefix(string oldPath, string newPath)
+    {
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        UpdatePathPrefix(connection, transaction, oldPath, newPath);
+        transaction.Commit();
+    }
+
     public Dictionary<string, FolderScanSignature> GetFolderScanSignatureMap()
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Path, FolderModifiedAt, ImageCount, TotalImageBytes FROM Folders WHERE FolderModifiedAt IS NOT NULL;";
+        command.CommandText = "SELECT Path, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes FROM Folders WHERE FolderModifiedAt IS NOT NULL;";
         using var reader = command.ExecuteReader();
         var result = new Dictionary<string, FolderScanSignature>(StringComparer.OrdinalIgnoreCase);
         while (reader.Read())
         {
-            var modifiedAt = FromDb(reader.GetString(1));
+            var modifiedAt = FromDb(reader.GetString(2));
             if (modifiedAt is not null)
             {
                 result[reader.GetString(0)] = new FolderScanSignature
                 {
+                    DirectoryModifiedAt = reader.IsDBNull(1) ? null : FromDb(reader.GetString(1)),
                     FolderModifiedAt = modifiedAt.Value,
-                    ImageCount = reader.GetInt32(2),
-                    TotalImageBytes = reader.GetInt64(3)
+                    ImageCount = reader.GetInt32(3),
+                    TotalImageBytes = reader.GetInt64(4)
                 };
             }
         }
@@ -154,7 +197,12 @@ public sealed class AppDatabase
         return result;
     }
 
-    public List<FolderItem> GetFolders(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode = QuickFilterMode.All)
+    public List<FolderItem> GetFolders(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode = QuickFilterMode.All)
+    {
+        return GetFoldersPage(mode, sortMode, searchField, searchText, tagFilters, excludedTagFilters, tagFilterMode, quickFilterMode, 0, int.MaxValue).Items;
+    }
+
+    public PagedFolderResult GetFoldersPage(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode, int offset, int limit, bool descending = false)
     {
         using var connection = OpenConnection();
         var folders = new List<FolderItem>();
@@ -191,6 +239,8 @@ public sealed class AppDatabase
                     """);
             }
 
+            ApplyRootModeFilter(where, mode);
+
             if (quickFilterMode == QuickFilterMode.Unviewed)
             {
                 where.Add("LastViewedAt IS NULL");
@@ -211,6 +261,10 @@ public sealed class AppDatabase
             {
                 where.Add("(ThumbnailPath IS NULL OR TRIM(ThumbnailPath) = '')");
             }
+            else if (quickFilterMode == QuickFilterMode.BrokenPath)
+            {
+                where.Add("PathExists = 0");
+            }
 
             if (!string.IsNullOrWhiteSpace(searchText))
             {
@@ -226,7 +280,7 @@ public sealed class AppDatabase
                 command.Parameters.AddWithValue("$search", $"%{searchText.Trim()}%");
             }
 
-            if (tagFilterMode == TagFilterMode.And)
+            if (tagFilterMode != TagFilterMode.Or)
             {
                 for (var tagIndex = 0; tagIndex < tagFilters.Count; tagIndex++)
                 {
@@ -248,23 +302,40 @@ public sealed class AppDatabase
                 where.Add($"EXISTS (SELECT 1 FROM FolderTags ft JOIN Tags t ON t.Id = ft.TagId WHERE ft.FolderId = Folders.Id AND ({string.Join(" OR ", tagConditions)}))");
             }
 
+            for (var tagIndex = 0; tagIndex < excludedTagFilters.Count; tagIndex++)
+            {
+                var parameterName = $"$excludedTagFilter{tagIndex}";
+                where.Add($"NOT EXISTS (SELECT 1 FROM FolderTags ft JOIN Tags t ON t.Id = ft.TagId WHERE ft.FolderId = Folders.Id AND t.Name = {parameterName})");
+                command.Parameters.AddWithValue(parameterName, excludedTagFilters[tagIndex]);
+            }
+
             var orderBy = sortMode switch
             {
+                FolderSortMode.Date when descending => "FolderModifiedAt ASC NULLS LAST, DisplayName COLLATE NOCASE ASC",
                 FolderSortMode.Date => "FolderModifiedAt DESC NULLS LAST, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.Name when descending => "DisplayName COLLATE NOCASE DESC, Path COLLATE NOCASE DESC",
                 FolderSortMode.Name => "DisplayName COLLATE NOCASE ASC, Path COLLATE NOCASE ASC",
+                FolderSortMode.Author when descending => "Author COLLATE NOCASE DESC, DisplayName COLLATE NOCASE DESC",
                 FolderSortMode.Author => "Author COLLATE NOCASE ASC, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.Score when descending => "Score ASC, DisplayName COLLATE NOCASE ASC",
                 FolderSortMode.Score => "Score DESC, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.Series when descending => "SeriesName COLLATE NOCASE DESC NULLS LAST, SeriesOrder IS NULL, SeriesOrder DESC, DisplayName COLLATE NOCASE DESC",
                 FolderSortMode.Series => "SeriesName COLLATE NOCASE ASC NULLS LAST, SeriesOrder IS NULL, SeriesOrder ASC, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.ImageCount when descending => "ImageCount ASC, DisplayName COLLATE NOCASE ASC",
                 FolderSortMode.ImageCount => "ImageCount DESC, DisplayName COLLATE NOCASE ASC",
+                _ when descending => "LastViewedAt ASC NULLS LAST, UpdatedAt ASC",
                 _ => "LastViewedAt DESC NULLS LAST, UpdatedAt DESC"
             };
 
             command.CommandText = $"""
-                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, CreatedAt, UpdatedAt
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
                 FROM Folders
                 {(where.Count == 0 ? "" : "WHERE " + string.Join(" AND ", where))}
-                ORDER BY {orderBy};
+                ORDER BY {orderBy}
+                LIMIT $limit OFFSET $offset;
                 """;
+            command.Parameters.AddWithValue("$limit", limit);
+            command.Parameters.AddWithValue("$offset", offset);
 
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -273,7 +344,119 @@ public sealed class AppDatabase
             }
         }
 
-        var tags = GetTagsForFolders(connection);
+        int totalCount;
+        using (var countCommand = connection.CreateCommand())
+        {
+            var where = new List<string>();
+            if (mode == FolderListMode.Favorites)
+            {
+                where.Add("IsFavorite = 1");
+            }
+            else if (mode == FolderListMode.Recent)
+            {
+                where.Add("LastViewedAt IS NOT NULL");
+            }
+            else if (mode == FolderListMode.Reserved)
+            {
+                where.Add("IsReserved = 1");
+            }
+            else if (mode == FolderListMode.Series)
+            {
+                where.Add("""
+                    SeriesName IS NOT NULL
+                    AND TRIM(SeriesName) <> ''
+                    AND Id = (
+                        SELECT FirstSeriesFolder.Id
+                        FROM Folders FirstSeriesFolder
+                        WHERE FirstSeriesFolder.SeriesName = Folders.SeriesName
+                        ORDER BY FirstSeriesFolder.SeriesOrder IS NULL,
+                                 FirstSeriesFolder.SeriesOrder ASC,
+                                 FirstSeriesFolder.DisplayName COLLATE NOCASE ASC,
+                                 FirstSeriesFolder.Id ASC
+                        LIMIT 1
+                    )
+                    """);
+            }
+
+            ApplyRootModeFilter(where, mode);
+
+            if (quickFilterMode == QuickFilterMode.Unviewed)
+            {
+                where.Add("LastViewedAt IS NULL");
+            }
+            else if (quickFilterMode == QuickFilterMode.NoScore)
+            {
+                where.Add("Score = 0");
+            }
+            else if (quickFilterMode == QuickFilterMode.NoTags)
+            {
+                where.Add("NOT EXISTS (SELECT 1 FROM FolderTags ft WHERE ft.FolderId = Folders.Id)");
+            }
+            else if (quickFilterMode == QuickFilterMode.NoSeries)
+            {
+                where.Add("(SeriesName IS NULL OR TRIM(SeriesName) = '')");
+            }
+            else if (quickFilterMode == QuickFilterMode.NoThumbnail)
+            {
+                where.Add("(ThumbnailPath IS NULL OR TRIM(ThumbnailPath) = '')");
+            }
+            else if (quickFilterMode == QuickFilterMode.BrokenPath)
+            {
+                where.Add("PathExists = 0");
+            }
+
+            if (!string.IsNullOrWhiteSpace(searchText))
+            {
+                var searchColumn = searchField switch
+                {
+                    FolderSearchField.Author => "Author",
+                    FolderSearchField.Memo => "Memo",
+                    FolderSearchField.Path => "Path",
+                    FolderSearchField.Series => "SeriesName",
+                    _ => "DisplayName"
+                };
+                where.Add($"{searchColumn} LIKE $search");
+                countCommand.Parameters.AddWithValue("$search", $"%{searchText.Trim()}%");
+            }
+
+            if (tagFilterMode != TagFilterMode.Or)
+            {
+                for (var tagIndex = 0; tagIndex < tagFilters.Count; tagIndex++)
+                {
+                    var parameterName = $"$tagFilter{tagIndex}";
+                    where.Add($"EXISTS (SELECT 1 FROM FolderTags ft JOIN Tags t ON t.Id = ft.TagId WHERE ft.FolderId = Folders.Id AND t.Name = {parameterName})");
+                    countCommand.Parameters.AddWithValue(parameterName, tagFilters[tagIndex]);
+                }
+            }
+            else if (tagFilters.Count > 0)
+            {
+                var tagConditions = new List<string>();
+                for (var tagIndex = 0; tagIndex < tagFilters.Count; tagIndex++)
+                {
+                    var parameterName = $"$tagFilter{tagIndex}";
+                    tagConditions.Add($"t.Name = {parameterName}");
+                    countCommand.Parameters.AddWithValue(parameterName, tagFilters[tagIndex]);
+                }
+
+                where.Add($"EXISTS (SELECT 1 FROM FolderTags ft JOIN Tags t ON t.Id = ft.TagId WHERE ft.FolderId = Folders.Id AND ({string.Join(" OR ", tagConditions)}))");
+            }
+
+            for (var tagIndex = 0; tagIndex < excludedTagFilters.Count; tagIndex++)
+            {
+                var parameterName = $"$excludedTagFilter{tagIndex}";
+                where.Add($"NOT EXISTS (SELECT 1 FROM FolderTags ft JOIN Tags t ON t.Id = ft.TagId WHERE ft.FolderId = Folders.Id AND t.Name = {parameterName})");
+                countCommand.Parameters.AddWithValue(parameterName, excludedTagFilters[tagIndex]);
+            }
+
+            countCommand.CommandText = $"""
+                SELECT COUNT(*)
+                FROM Folders
+                {(where.Count == 0 ? "" : "WHERE " + string.Join(" AND ", where))};
+                """;
+            totalCount = Convert.ToInt32(countCommand.ExecuteScalar());
+        }
+
+        var tags = GetTagsForFolders(connection, folders.Select(folder => folder.Id).ToList());
         foreach (var folder in folders)
         {
             if (tags.TryGetValue(folder.Id, out var folderTags))
@@ -282,7 +465,11 @@ public sealed class AppDatabase
             }
         }
 
-        return folders;
+        return new PagedFolderResult
+        {
+            Items = folders,
+            TotalCount = totalCount
+        };
     }
 
     public List<string> GetTags()
@@ -327,7 +514,7 @@ public sealed class AppDatabase
         using (var command = connection.CreateCommand())
         {
             command.CommandText = """
-                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, CreatedAt, UpdatedAt
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
                 FROM Folders
                 WHERE SeriesName = $seriesName
                 ORDER BY SeriesOrder IS NULL,
@@ -353,6 +540,182 @@ public sealed class AppDatabase
         }
 
         return folders;
+    }
+
+    public int GetSeriesMaxOrder(string seriesName)
+    {
+        if (string.IsNullOrWhiteSpace(seriesName))
+        {
+            return 0;
+        }
+
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(MAX(SeriesOrder), 0)
+            FROM Folders
+            WHERE SeriesName = $seriesName;
+            """;
+        command.Parameters.AddWithValue("$seriesName", seriesName);
+        return Convert.ToInt32(command.ExecuteScalar());
+    }
+
+    public Dictionary<string, int> GetSeriesImageCounts(IEnumerable<string> seriesNames)
+    {
+        var names = seriesNames
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (names.Count == 0)
+        {
+            return result;
+        }
+
+        using var connection = OpenConnection();
+        foreach (var chunk in names.Chunk(800))
+        {
+            using var command = connection.CreateCommand();
+            var parameters = new List<string>();
+            for (var index = 0; index < chunk.Length; index++)
+            {
+                var parameterName = $"$seriesName{index}";
+                parameters.Add(parameterName);
+                command.Parameters.AddWithValue(parameterName, chunk[index]);
+            }
+
+            command.CommandText = $"""
+                SELECT SeriesName, SUM(ImageCount)
+                FROM Folders
+                WHERE SeriesName IN ({string.Join(", ", parameters)})
+                GROUP BY SeriesName COLLATE NOCASE;
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                result[reader.GetString(0)] = Convert.ToInt32(reader.GetInt64(1));
+            }
+        }
+
+        return result;
+    }
+
+    public Dictionary<string, FolderItem> GetFirstFoldersInSeries(IEnumerable<string> seriesNames)
+    {
+        var names = seriesNames
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var result = new Dictionary<string, FolderItem>(StringComparer.OrdinalIgnoreCase);
+        if (names.Count == 0)
+        {
+            return result;
+        }
+
+        using var connection = OpenConnection();
+        foreach (var chunk in names.Chunk(800))
+        {
+            var folders = new List<FolderItem>();
+            using (var command = connection.CreateCommand())
+            {
+                var parameters = new List<string>();
+                for (var index = 0; index < chunk.Length; index++)
+                {
+                    var parameterName = $"$seriesName{index}";
+                    parameters.Add(parameterName);
+                    command.Parameters.AddWithValue(parameterName, chunk[index]);
+                }
+
+                command.CommandText = $"""
+                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                    FROM Folders
+                    WHERE SeriesName IN ({string.Join(", ", parameters)})
+                    ORDER BY SeriesName COLLATE NOCASE ASC,
+                             SeriesOrder IS NULL,
+                             SeriesOrder ASC,
+                             DisplayName COLLATE NOCASE ASC,
+                             Id ASC;
+                    """;
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    folders.Add(ReadFolder(reader));
+                }
+            }
+
+            var tags = GetTagsForFolders(connection, folders.Select(folder => folder.Id).ToList());
+            foreach (var folder in folders)
+            {
+                if (string.IsNullOrWhiteSpace(folder.SeriesName) || result.ContainsKey(folder.SeriesName))
+                {
+                    continue;
+                }
+
+                if (tags.TryGetValue(folder.Id, out var folderTags))
+                {
+                    folder.Tags = folderTags;
+                }
+
+                result[folder.SeriesName] = folder;
+            }
+        }
+
+        return result;
+    }
+
+    public List<DuplicateNameGroup> GetDuplicateNameGroups()
+    {
+        using var connection = OpenConnection();
+        var duplicateNames = new List<string>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT DisplayName
+                FROM Folders
+                GROUP BY DisplayName COLLATE NOCASE
+                HAVING COUNT(*) > 1
+                ORDER BY DisplayName COLLATE NOCASE;
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                duplicateNames.Add(reader.GetString(0));
+            }
+        }
+
+        var result = new List<DuplicateNameGroup>();
+        foreach (var displayName in duplicateNames)
+        {
+            var folders = new List<FolderItem>();
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = """
+                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                    FROM Folders
+                    WHERE DisplayName = $displayName COLLATE NOCASE
+                    ORDER BY FolderModifiedAt DESC NULLS LAST, Path COLLATE NOCASE ASC;
+                    """;
+                command.Parameters.AddWithValue("$displayName", displayName);
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    folders.Add(ReadFolder(reader));
+                }
+            }
+
+            if (folders.Count > 1)
+            {
+                result.Add(new DuplicateNameGroup
+                {
+                    DisplayName = displayName,
+                    Folders = folders
+                });
+            }
+        }
+
+        return result;
     }
 
     public List<SeriesQualityIssue> GetSeriesQualityIssues()
@@ -563,7 +926,10 @@ public sealed class AppDatabase
             });
         }
 
-        return images;
+        return images
+            .OrderBy(image => image.FileName, NaturalStringComparer.OrdinalIgnoreCase)
+            .ThenBy(image => image.SortOrder)
+            .ToList();
     }
 
     public List<ImageItem> GetSeriesImages(string seriesName)
@@ -601,7 +967,13 @@ public sealed class AppDatabase
             });
         }
 
-        return images;
+        return images
+            .OrderBy(image => image.FolderSeriesOrder is null)
+            .ThenBy(image => image.FolderSeriesOrder)
+            .ThenBy(image => image.FolderDisplayName ?? "", NaturalStringComparer.OrdinalIgnoreCase)
+            .ThenBy(image => image.FileName, NaturalStringComparer.OrdinalIgnoreCase)
+            .ThenBy(image => image.SortOrder)
+            .ToList();
     }
 
     public FolderItem? GetFirstFolderInSeries(string seriesName)
@@ -609,7 +981,7 @@ public sealed class AppDatabase
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, CreatedAt, UpdatedAt
+            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
             FROM Folders
             WHERE SeriesName = $seriesName
             ORDER BY SeriesOrder IS NULL,
@@ -640,14 +1012,48 @@ public sealed class AppDatabase
         return folder;
     }
 
+    public FolderItem? GetFolder(long folderId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+            FROM Folders
+            WHERE Id = $folderId
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$folderId", folderId);
+
+        FolderItem folder;
+        using (var reader = command.ExecuteReader())
+        {
+            if (!reader.Read())
+            {
+                return null;
+            }
+
+            folder = ReadFolder(reader);
+        }
+
+        var tags = GetTagsForFolders(connection, [folder.Id]);
+        if (tags.TryGetValue(folder.Id, out var folderTags))
+        {
+            folder.Tags = folderTags;
+        }
+
+        return folder;
+    }
+
     public List<ImageItem> GetAllImages()
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Id, FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder
+            SELECT Images.Id, Images.FolderId, Images.Path, Images.FileName, Images.FileSize, Images.ModifiedAt, Images.SortOrder,
+                   Folders.DisplayName, Folders.Path, Folders.FolderModifiedAt, Folders.ImageCount, Folders.TotalImageBytes
             FROM Images
-            ORDER BY FileName COLLATE NOCASE ASC, FileSize ASC, Path COLLATE NOCASE ASC;
+            JOIN Folders ON Folders.Id = Images.FolderId
+            ORDER BY Images.FileName COLLATE NOCASE ASC, Images.FileSize ASC, Images.Path COLLATE NOCASE ASC;
             """;
 
         using var reader = command.ExecuteReader();
@@ -662,7 +1068,12 @@ public sealed class AppDatabase
                 FileName = reader.GetString(3),
                 FileSize = reader.GetInt64(4),
                 ModifiedAt = FromDb(reader.GetString(5)) ?? DateTime.MinValue,
-                SortOrder = reader.GetInt32(6)
+                SortOrder = reader.GetInt32(6),
+                FolderDisplayName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                FolderPath = reader.IsDBNull(8) ? null : reader.GetString(8),
+                FolderModifiedAt = reader.IsDBNull(9) ? null : FromDb(reader.GetString(9)),
+                FolderImageCount = reader.GetInt32(10),
+                FolderTotalImageBytes = reader.GetInt64(11)
             });
         }
 
@@ -908,18 +1319,20 @@ public sealed class AppDatabase
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO Folders (Path, DisplayName, Author, Number, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, CreatedAt, UpdatedAt)
-                VALUES ($path, $displayName, $author, $number, $folderModifiedAt, $imageCount, $totalImageBytes, $thumbnailPath, $createdAt, $updatedAt);
+                INSERT INTO Folders (Path, DisplayName, Author, Number, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt)
+                VALUES ($path, $displayName, $author, $number, $directoryModifiedAt, $folderModifiedAt, $imageCount, $totalImageBytes, $thumbnailPath, 1, $pathCheckedAt, $createdAt, $updatedAt);
                 SELECT last_insert_rowid();
                 """;
             insert.Parameters.AddWithValue("$path", result.FolderPath);
             insert.Parameters.AddWithValue("$displayName", parsed.DisplayName);
             insert.Parameters.AddWithValue("$author", DbValue(parsed.Author));
             insert.Parameters.AddWithValue("$number", DbValue(parsed.Number));
+            insert.Parameters.AddWithValue("$directoryModifiedAt", ToDb(result.DirectoryModifiedAt));
             insert.Parameters.AddWithValue("$folderModifiedAt", ToDb(folderModifiedAt));
             insert.Parameters.AddWithValue("$imageCount", result.ImageCount);
             insert.Parameters.AddWithValue("$totalImageBytes", result.TotalImageBytes);
             insert.Parameters.AddWithValue("$thumbnailPath", result.Images[0].FullName);
+            insert.Parameters.AddWithValue("$pathCheckedAt", ToDb(now));
             insert.Parameters.AddWithValue("$createdAt", ToDb(now));
             insert.Parameters.AddWithValue("$updatedAt", ToDb(now));
             folderId = (long)(insert.ExecuteScalar() ?? 0L);
@@ -931,16 +1344,21 @@ public sealed class AppDatabase
             update.CommandText = """
                 UPDATE Folders
                 SET ThumbnailPath = COALESCE(ThumbnailPath, $thumbnailPath),
+                    DirectoryModifiedAt = $directoryModifiedAt,
                     FolderModifiedAt = $folderModifiedAt,
                     ImageCount = $imageCount,
                     TotalImageBytes = $totalImageBytes,
+                    PathExists = 1,
+                    PathCheckedAt = $pathCheckedAt,
                     UpdatedAt = $updatedAt
                 WHERE Id = $id;
                 """;
             update.Parameters.AddWithValue("$thumbnailPath", result.Images[0].FullName);
+            update.Parameters.AddWithValue("$directoryModifiedAt", ToDb(result.DirectoryModifiedAt));
             update.Parameters.AddWithValue("$folderModifiedAt", ToDb(folderModifiedAt));
             update.Parameters.AddWithValue("$imageCount", result.ImageCount);
             update.Parameters.AddWithValue("$totalImageBytes", result.TotalImageBytes);
+            update.Parameters.AddWithValue("$pathCheckedAt", ToDb(now));
             update.Parameters.AddWithValue("$updatedAt", ToDb(now));
             update.Parameters.AddWithValue("$id", folderId.Value);
             update.ExecuteNonQuery();
@@ -982,19 +1400,30 @@ public sealed class AppDatabase
 
     public sealed class ScanWriteSession : IDisposable
     {
+        private const int BatchSize = 500;
+
         private readonly SqliteConnection connection;
-        private readonly SqliteTransaction transaction;
+        private SqliteTransaction transaction;
+        private int pendingWrites;
         private bool committed;
 
         public ScanWriteSession(AppDatabase database)
         {
             connection = database.OpenConnection();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA temp_store = MEMORY;";
+            command.ExecuteNonQuery();
             transaction = connection.BeginTransaction();
         }
 
         public void Save(FolderScanResult result)
         {
             UpsertScannedFolder(connection, transaction, result);
+            pendingWrites++;
+            if (pendingWrites >= BatchSize)
+            {
+                CommitCurrentBatch();
+            }
         }
 
         public void Commit()
@@ -1013,9 +1442,17 @@ public sealed class AppDatabase
             transaction.Dispose();
             connection.Dispose();
         }
+
+        private void CommitCurrentBatch()
+        {
+            transaction.Commit();
+            transaction.Dispose();
+            transaction = connection.BeginTransaction();
+            pendingWrites = 0;
+        }
     }
 
-    public CleanupSummary RemoveMissingFoldersAndImages()
+    public CleanupSummary RemoveMissingFoldersAndImages(bool checkImageFiles = true)
     {
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -1036,20 +1473,25 @@ public sealed class AppDatabase
         {
             if (!Directory.Exists(folder.Path))
             {
-                using var deleteFolder = connection.CreateCommand();
-                deleteFolder.Transaction = transaction;
-                deleteFolder.CommandText = "DELETE FROM Folders WHERE Id = $id;";
-                deleteFolder.Parameters.AddWithValue("$id", folder.Id);
-                deleteFolder.ExecuteNonQuery();
+                DeleteFolder(connection, transaction, folder.Id);
                 summary.RemovedFolders++;
                 continue;
             }
         }
 
-        using (var command = connection.CreateCommand())
+        if (checkImageFiles)
         {
+            using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = "SELECT Id, Path FROM Images;";
+            command.CommandText = """
+                SELECT Images.Id, Images.Path
+                FROM Images
+                JOIN Folders ON Folders.Id = Images.FolderId;
+                """;
+            using var deleteImage = connection.CreateCommand();
+            deleteImage.Transaction = transaction;
+            deleteImage.CommandText = "DELETE FROM Images WHERE Id = $id;";
+            var idParameter = deleteImage.Parameters.Add("$id", SqliteType.Integer);
             var missing = new List<long>();
             using (var reader = command.ExecuteReader())
             {
@@ -1064,10 +1506,7 @@ public sealed class AppDatabase
 
             foreach (var imageId in missing)
             {
-                using var deleteImage = connection.CreateCommand();
-                deleteImage.Transaction = transaction;
-                deleteImage.CommandText = "DELETE FROM Images WHERE Id = $id;";
-                deleteImage.Parameters.AddWithValue("$id", imageId);
+                idParameter.Value = imageId;
                 deleteImage.ExecuteNonQuery();
                 summary.RemovedImages++;
             }
@@ -1082,6 +1521,68 @@ public sealed class AppDatabase
 
         transaction.Commit();
         return summary;
+    }
+
+    public int RefreshFolderPathStatus(IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        using var connection = OpenConnection();
+        var folders = new List<(long Id, string Path)>();
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = "SELECT Id, Path FROM Folders ORDER BY Path COLLATE NOCASE;";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                folders.Add((reader.GetInt64(0), reader.GetString(1)));
+            }
+        }
+
+        using var transaction = connection.BeginTransaction();
+        using var update = connection.CreateCommand();
+        update.Transaction = transaction;
+        update.CommandText = """
+            UPDATE Folders
+            SET PathExists = $pathExists,
+                PathCheckedAt = $pathCheckedAt
+            WHERE Id = $id;
+            """;
+        var pathExistsParameter = update.Parameters.Add("$pathExists", SqliteType.Integer);
+        var pathCheckedAtParameter = update.Parameters.Add("$pathCheckedAt", SqliteType.Text);
+        var idParameter = update.Parameters.Add("$id", SqliteType.Integer);
+        var missingCount = 0;
+        var now = ToDb(DateTime.Now);
+        for (var index = 0; index < folders.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var folder = folders[index];
+            var exists = Directory.Exists(folder.Path);
+            if (!exists)
+            {
+                missingCount++;
+            }
+
+            pathExistsParameter.Value = exists ? 1 : 0;
+            pathCheckedAtParameter.Value = now;
+            idParameter.Value = folder.Id;
+            update.ExecuteNonQuery();
+            if ((index + 1) % 250 == 0)
+            {
+                progress?.Report($"경로 확인 중... {index + 1:N0} / {folders.Count:N0}");
+            }
+        }
+
+        transaction.Commit();
+        progress?.Report($"경로 확인 완료: 깨진 경로 {missingCount:N0}개 / 전체 {folders.Count:N0}개");
+        return missingCount;
+    }
+
+    private static void DeleteFolder(SqliteConnection connection, SqliteTransaction transaction, long folderId)
+    {
+        using var deleteFolder = connection.CreateCommand();
+        deleteFolder.Transaction = transaction;
+        deleteFolder.CommandText = "DELETE FROM Folders WHERE Id = $id;";
+        deleteFolder.Parameters.AddWithValue("$id", folderId);
+        deleteFolder.ExecuteNonQuery();
     }
 
     public int ClearBrokenThumbnails()
@@ -1148,7 +1649,9 @@ public sealed class AppDatabase
     public void MarkFolderViewed(long folderId, string? lastImagePath)
     {
         using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
         using var command = connection.CreateCommand();
+        command.Transaction = transaction;
         command.CommandText = """
             UPDATE Folders
             SET ViewCount = ViewCount + 1,
@@ -1163,6 +1666,23 @@ public sealed class AppDatabase
         command.Parameters.AddWithValue("$updatedAt", now);
         command.Parameters.AddWithValue("$folderId", folderId);
         command.ExecuteNonQuery();
+
+        using var prune = connection.CreateCommand();
+        prune.Transaction = transaction;
+        prune.CommandText = """
+            UPDATE Folders
+            SET LastViewedAt = NULL,
+                LastImagePath = NULL
+            WHERE Id IN (
+                SELECT Id
+                FROM Folders
+                WHERE LastViewedAt IS NOT NULL
+                ORDER BY LastViewedAt DESC, Id DESC
+                LIMIT -1 OFFSET 100
+            );
+            """;
+        prune.ExecuteNonQuery();
+        transaction.Commit();
     }
 
     public void UpdateLastImagePath(long folderId, string? lastImagePath)
@@ -1205,6 +1725,91 @@ public sealed class AppDatabase
         return connection;
     }
 
+    private static void ApplyRootModeFilter(List<string> where, FolderListMode mode)
+    {
+        const string incomingRootCondition = """
+            EXISTS (
+                SELECT 1
+                FROM Roots IncomingRoots
+                WHERE IncomingRoots.Kind = 'Incoming'
+                  AND (
+                      Folders.Path = IncomingRoots.Path
+                      OR substr(Folders.Path, 1, length(IncomingRoots.Path || '\')) = IncomingRoots.Path || '\'
+                  )
+            )
+            """;
+
+        where.Add(mode == FolderListMode.NewRegistration ? incomingRootCondition : $"NOT {incomingRootCondition}");
+    }
+
+    private static void UpdatePathPrefix(SqliteConnection connection, SqliteTransaction transaction, string oldPath, string newPath)
+    {
+        var oldPrefix = EnsureTrailingSeparator(oldPath);
+        var newPrefix = EnsureTrailingSeparator(newPath);
+        using var folders = connection.CreateCommand();
+        folders.Transaction = transaction;
+        folders.CommandText = """
+            UPDATE Folders
+            SET Path = CASE
+                    WHEN Path = $oldPath THEN $newPath
+                    ELSE $newPrefix || substr(Path, length($oldPrefix) + 1)
+                END,
+                ThumbnailPath = CASE
+                    WHEN ThumbnailPath = $oldPath THEN $newPath
+                    WHEN ThumbnailPath IS NOT NULL AND substr(ThumbnailPath, 1, length($oldPrefix)) = $oldPrefix THEN $newPrefix || substr(ThumbnailPath, length($oldPrefix) + 1)
+                    ELSE ThumbnailPath
+                END,
+                LastImagePath = CASE
+                    WHEN LastImagePath = $oldPath THEN $newPath
+                    WHEN LastImagePath IS NOT NULL AND substr(LastImagePath, 1, length($oldPrefix)) = $oldPrefix THEN $newPrefix || substr(LastImagePath, length($oldPrefix) + 1)
+                    ELSE LastImagePath
+                END,
+                PathExists = 1,
+                PathCheckedAt = $pathCheckedAt,
+                UpdatedAt = $updatedAt
+            WHERE Path = $oldPath
+               OR substr(Path, 1, length($oldPrefix)) = $oldPrefix;
+            """;
+        AddPathPrefixParameters(folders, oldPath, newPath, oldPrefix, newPrefix);
+        folders.ExecuteNonQuery();
+
+        using var images = connection.CreateCommand();
+        images.Transaction = transaction;
+        images.CommandText = """
+            UPDATE Images
+            SET Path = CASE
+                    WHEN Path = $oldPath THEN $newPath
+                    ELSE $newPrefix || substr(Path, length($oldPrefix) + 1)
+                END
+            WHERE Path = $oldPath
+               OR substr(Path, 1, length($oldPrefix)) = $oldPrefix;
+            """;
+        AddPathPrefixParameters(images, oldPath, newPath, oldPrefix, newPrefix);
+        images.ExecuteNonQuery();
+    }
+
+    private static void AddPathPrefixParameters(SqliteCommand command, string oldPath, string newPath, string oldPrefix, string newPrefix)
+    {
+        command.Parameters.AddWithValue("$oldPath", oldPath);
+        command.Parameters.AddWithValue("$newPath", newPath);
+        command.Parameters.AddWithValue("$oldPrefix", oldPrefix);
+        command.Parameters.AddWithValue("$newPrefix", newPrefix);
+        command.Parameters.AddWithValue("$pathCheckedAt", ToDb(DateTime.Now));
+        command.Parameters.AddWithValue("$updatedAt", ToDb(DateTime.Now));
+    }
+
+    private static string EnsureTrailingSeparator(string path)
+    {
+        return path.EndsWith(Path.DirectorySeparatorChar) || path.EndsWith(Path.AltDirectorySeparatorChar)
+            ? path
+            : path + Path.DirectorySeparatorChar;
+    }
+
+    private static string ToRootKind(RootKind kind)
+    {
+        return kind == RootKind.Incoming ? "Incoming" : "Main";
+    }
+
     private static FolderItem ReadFolder(SqliteDataReader reader)
     {
         return new FolderItem
@@ -1227,8 +1832,10 @@ public sealed class AppDatabase
             ImageCount = reader.GetInt32(15),
             TotalImageBytes = reader.GetInt64(16),
             ThumbnailPath = reader.IsDBNull(17) ? null : reader.GetString(17),
-            CreatedAt = FromDb(reader.GetString(18)) ?? DateTime.MinValue,
-            UpdatedAt = FromDb(reader.GetString(19)) ?? DateTime.MinValue
+            PathExists = reader.GetInt32(18) == 1,
+            PathCheckedAt = reader.IsDBNull(19) ? null : FromDb(reader.GetString(19)),
+            CreatedAt = FromDb(reader.GetString(20)) ?? DateTime.MinValue,
+            UpdatedAt = FromDb(reader.GetString(21)) ?? DateTime.MinValue
         };
     }
 
@@ -1289,13 +1896,54 @@ public sealed class AppDatabase
         alter.ExecuteNonQuery();
     }
 
-    private static Dictionary<long, List<string>> GetTagsForFolders(SqliteConnection connection)
+    private static void EnsureIndexes(SqliteConnection connection)
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
+            CREATE INDEX IF NOT EXISTS idx_folders_path ON Folders(Path);
+            CREATE INDEX IF NOT EXISTS idx_folders_directorymodifiedat ON Folders(DirectoryModifiedAt);
+            CREATE INDEX IF NOT EXISTS idx_folders_foldermodifiedat ON Folders(FolderModifiedAt);
+            CREATE INDEX IF NOT EXISTS idx_folders_pathexists ON Folders(PathExists);
+            CREATE INDEX IF NOT EXISTS idx_folders_displayname ON Folders(DisplayName COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_folders_author ON Folders(Author COLLATE NOCASE);
+            CREATE INDEX IF NOT EXISTS idx_folders_series ON Folders(SeriesName COLLATE NOCASE, SeriesOrder);
+            CREATE INDEX IF NOT EXISTS idx_folders_score ON Folders(Score);
+            CREATE INDEX IF NOT EXISTS idx_folders_lastviewedat ON Folders(LastViewedAt);
+            CREATE INDEX IF NOT EXISTS idx_images_folderid ON Images(FolderId);
+            CREATE INDEX IF NOT EXISTS idx_images_path ON Images(Path);
+            CREATE INDEX IF NOT EXISTS idx_images_filename_size ON Images(FileName COLLATE NOCASE, FileSize);
+            CREATE INDEX IF NOT EXISTS idx_foldertags_tagid ON FolderTags(TagId);
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static Dictionary<long, List<string>> GetTagsForFolders(SqliteConnection connection, IReadOnlyList<long>? folderIds = null)
+    {
+        if (folderIds is not null && folderIds.Count == 0)
+        {
+            return [];
+        }
+
+        using var command = connection.CreateCommand();
+        var where = "";
+        if (folderIds is not null)
+        {
+            var parameters = new List<string>();
+            for (var index = 0; index < folderIds.Count; index++)
+            {
+                var parameterName = $"$folderId{index}";
+                parameters.Add(parameterName);
+                command.Parameters.AddWithValue(parameterName, folderIds[index]);
+            }
+
+            where = $"WHERE ft.FolderId IN ({string.Join(", ", parameters)})";
+        }
+
+        command.CommandText = $"""
             SELECT ft.FolderId, t.Name
             FROM FolderTags ft
             JOIN Tags t ON t.Id = ft.TagId
+            {where}
             ORDER BY t.Name COLLATE NOCASE;
             """;
         using var reader = command.ExecuteReader();
@@ -1387,3 +2035,4 @@ public sealed class AppDatabase
 
     private static DateTime? FromDb(string? value) => DateTime.TryParse(value, out var parsed) ? parsed : null;
 }
+

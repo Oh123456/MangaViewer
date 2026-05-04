@@ -12,6 +12,9 @@ public sealed class AppSettings
     public List<int> FolderListColumnWidths { get; set; } = [];
     public bool ViewerFitToWindow { get; set; } = true;
     public bool ViewerFullscreen { get; set; }
+    public bool AutoRefreshPathStatusAfterScan { get; set; }
+    public int PartialDuplicateThresholdPercent { get; set; } = 80;
+    public string LanguageCode { get; set; } = "kr";
 
     public static AppSettings Current => current ??= Load();
 

@@ -20,11 +20,19 @@ public sealed class FolderItem
     public int ImageCount { get; set; }
     public long TotalImageBytes { get; set; }
     public string? ThumbnailPath { get; set; }
+    public bool PathExists { get; set; } = true;
+    public DateTime? PathCheckedAt { get; set; }
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
     public List<string> Tags { get; set; } = [];
 
     public string TagSummary => Tags.Count == 0 ? "" : string.Join(", ", Tags);
+}
+
+public sealed class PagedFolderResult
+{
+    public List<FolderItem> Items { get; init; } = [];
+    public int TotalCount { get; init; }
 }
 
 public sealed class ImageItem
@@ -37,21 +45,43 @@ public sealed class ImageItem
     public DateTime ModifiedAt { get; set; }
     public int SortOrder { get; set; }
     public string? FolderDisplayName { get; set; }
+    public string? FolderPath { get; set; }
+    public DateTime? FolderModifiedAt { get; set; }
+    public int FolderImageCount { get; set; }
+    public long FolderTotalImageBytes { get; set; }
     public int? FolderSeriesOrder { get; set; }
 }
 
 public sealed class DuplicateImageCandidate
 {
+    public int GroupNumber { get; set; }
+    public int GroupCount { get; set; }
     public string FileName { get; set; } = "";
     public long FileSize { get; set; }
     public string Hash { get; set; } = "";
     public string Path { get; set; } = "";
 }
 
+public sealed class DuplicateFolderCandidate
+{
+    public int GroupNumber { get; set; }
+    public int GroupFolderCount { get; set; }
+    public string FolderName { get; set; } = "";
+    public string FolderPath { get; set; } = "";
+    public int ImageCount { get; set; }
+    public int MatchedImageCount { get; set; }
+    public double MatchRate { get; set; }
+    public long TotalImageBytes { get; set; }
+    public DateTime? ModifiedAt { get; set; }
+    public string DuplicateType { get; set; } = "완전";
+    public string CleanupHint { get; set; } = "";
+}
+
 public sealed class FolderScanResult
 {
     public required string FolderPath { get; init; }
     public required List<FileInfo> Images { get; init; }
+    public DateTime DirectoryModifiedAt { get; init; }
 
     public DateTime FolderModifiedAt => Images.Count == 0 ? DateTime.MinValue : Images.Max(image => image.LastWriteTime);
 
@@ -62,6 +92,7 @@ public sealed class FolderScanResult
 
 public sealed class ScanProgress
 {
+    public string Stage { get; init; } = "";
     public int FoldersVisited { get; init; }
     public int ImageFoldersFound { get; init; }
     public int SavedFolders { get; init; }
@@ -81,9 +112,16 @@ public sealed class ScanSummary
 
 public sealed class FolderScanSignature
 {
+    public DateTime? DirectoryModifiedAt { get; init; }
     public DateTime FolderModifiedAt { get; init; }
     public int ImageCount { get; init; }
     public long TotalImageBytes { get; init; }
+}
+
+public enum ScanMode
+{
+    QuickSync,
+    FullRescan
 }
 
 public sealed class CleanupSummary
@@ -98,6 +136,12 @@ public sealed class SeriesQualityIssue
     public string IssueType { get; set; } = "";
     public string Detail { get; set; } = "";
     public string FolderNames { get; set; } = "";
+}
+
+public sealed class DuplicateNameGroup
+{
+    public string DisplayName { get; set; } = "";
+    public List<FolderItem> Folders { get; set; } = [];
 }
 
 public sealed class ScanLog
@@ -118,7 +162,14 @@ public enum FolderListMode
     Favorites,
     Recent,
     Reserved,
-    Series
+    Series,
+    NewRegistration
+}
+
+public enum RootKind
+{
+    Main,
+    Incoming
 }
 
 public enum FolderSortMode
@@ -143,6 +194,7 @@ public enum FolderSearchField
 
 public enum TagFilterMode
 {
+    Contains,
     And,
     Or
 }

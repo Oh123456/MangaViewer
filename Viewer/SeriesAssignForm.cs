@@ -51,6 +51,7 @@ public sealed class SeriesAssignForm : Form
     public SeriesAssignForm(IReadOnlyList<FolderItem> folders, string title = "묶음으로 만들기", string? initialSeriesName = null)
     {
         Text = title;
+        AppIcons.ApplyTo(this);
         Width = 720;
         Height = 520;
         MinimumSize = new Size(620, 420);
@@ -58,6 +59,7 @@ public sealed class SeriesAssignForm : Form
 
         BuildUi();
         LoadFolders(folders, initialSeriesName);
+        Localization.ApplyTo(this);
     }
 
     private void BuildUi()
@@ -121,7 +123,7 @@ public sealed class SeriesAssignForm : Form
             if (!int.TryParse(eventArgs.FormattedValue?.ToString(), out var order) || order <= 0)
             {
                 eventArgs.Cancel = true;
-                MessageBox.Show(this, "편수는 1 이상의 숫자로 입력하세요.", "묶음", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, Localization.T("편수는 1 이상의 숫자로 입력하세요."), Localization.T("묶음"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         };
         root.Controls.Add(folderGrid, 0, 1);
@@ -145,7 +147,7 @@ public sealed class SeriesAssignForm : Form
         var bottomButtons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft
+            FlowDirection = FlowDirection.LeftToRight
         };
         var okButton = new Button
         {
@@ -219,14 +221,14 @@ public sealed class SeriesAssignForm : Form
             folderGrid.EndEdit();
             if (string.IsNullOrWhiteSpace(SeriesName))
             {
-                MessageBox.Show(this, "묶음 이름을 입력하세요.", "묶음", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, Localization.T("묶음 이름을 입력하세요."), Localization.T("묶음"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 eventArgs.Cancel = true;
                 return;
             }
 
             if (Assignments.Count == 0)
             {
-                MessageBox.Show(this, "묶음에 포함할 폴더가 없습니다.", "묶음", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, Localization.T("묶음에 포함할 폴더가 없습니다."), Localization.T("묶음"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 eventArgs.Cancel = true;
                 return;
             }

@@ -7,6 +7,7 @@ public sealed class SeriesQualityIssuesForm : Form
     public SeriesQualityIssuesForm(IReadOnlyList<SeriesQualityIssue> issues)
     {
         Text = "묶음 품질 검사";
+        AppIcons.ApplyTo(this);
         Width = 900;
         Height = 560;
         MinimumSize = new Size(720, 420);
@@ -14,6 +15,7 @@ public sealed class SeriesQualityIssuesForm : Form
 
         BuildUi();
         LoadIssues(issues);
+        Localization.ApplyTo(this);
     }
 
     private void BuildUi()

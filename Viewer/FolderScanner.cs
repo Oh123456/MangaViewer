@@ -31,6 +31,7 @@ public sealed class FolderScanner
                     var images = GetImages(directory);
                     if (images.Count > 0)
                     {
+                        var directoryModifiedAt = GetDirectoryModifiedAt(directory);
                         if (loggedImageFolderCount < 100)
                         {
                             scanLog.Add($"이미지 폴더 발견: {directory} ({images.Count}개)");
@@ -40,6 +41,7 @@ public sealed class FolderScanner
                         results.Add(new FolderScanResult
                         {
                             FolderPath = directory,
+                            DirectoryModifiedAt = directoryModifiedAt,
                             Images = images
                         });
                     }
@@ -50,6 +52,7 @@ public sealed class FolderScanner
                         lastProgressReport = now;
                         progress?.Report(new ScanProgress
                         {
+                            Stage = "폴더 탐색 중",
                             FoldersVisited = foldersVisited,
                             ImageFoldersFound = results.Count,
                             CurrentPath = directory
@@ -60,6 +63,7 @@ public sealed class FolderScanner
 
             progress?.Report(new ScanProgress
             {
+                Stage = "폴더 탐색 완료",
                 FoldersVisited = foldersVisited,
                 ImageFoldersFound = results.Count,
                 CurrentPath = null
@@ -71,6 +75,8 @@ public sealed class FolderScanner
 
     public Task<ScanSummary> ScanStreamingAsync(
         IEnumerable<string> roots,
+        ScanMode scanMode,
+        IReadOnlyDictionary<string, FolderScanSignature> existingSignatureMap,
         Func<FolderScanResult, bool> shouldSave,
         Action<FolderScanResult> saveResult,
         IProgress<ScanProgress>? progress,
@@ -80,16 +86,32 @@ public sealed class FolderScanner
         return Task.Run(() =>
         {
             var summary = new ScanSummary();
+            var stopwatch = System.Diagnostics.Stopwatch.StartNew();
             var lastProgressReport = DateTime.MinValue;
             var loggedImageFolderCount = 0;
+            var modeText = scanMode == ScanMode.QuickSync ? "빠른 동기화" : "전체 재스캔";
+            scanLog.Add($"{modeText} 시작");
 
             foreach (var root in roots.Where(Directory.Exists))
             {
                 scanLog.Add($"루트 스캔 시작: {root}");
+                var rootStopwatch = System.Diagnostics.Stopwatch.StartNew();
                 foreach (var directory in EnumerateDirectoriesSafe(root, scanLog))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     summary.FoldersVisited++;
+
+                    var directoryModifiedAt = GetDirectoryModifiedAt(directory);
+                    if (scanMode == ScanMode.QuickSync
+                        && existingSignatureMap.TryGetValue(directory, out var existingSignature)
+                        && existingSignature.DirectoryModifiedAt is not null
+                        && directoryModifiedAt <= existingSignature.DirectoryModifiedAt.Value)
+                    {
+                        summary.ImageFoldersFound++;
+                        summary.SkippedFolders++;
+                        ReportProgressIfNeeded(progress, ref lastProgressReport, summary, directory, "변경 확인 중");
+                        continue;
+                    }
 
                     var images = GetImages(directory);
                     if (images.Count > 0)
@@ -98,6 +120,7 @@ public sealed class FolderScanner
                         var result = new FolderScanResult
                         {
                             FolderPath = directory,
+                            DirectoryModifiedAt = directoryModifiedAt,
                             Images = images
                         };
 
@@ -117,33 +140,44 @@ public sealed class FolderScanner
                         }
                     }
 
-                    var now = DateTime.Now;
-                    if ((now - lastProgressReport).TotalMilliseconds >= 150)
-                    {
-                        lastProgressReport = now;
-                        progress?.Report(new ScanProgress
-                        {
-                            FoldersVisited = summary.FoldersVisited,
-                            ImageFoldersFound = summary.ImageFoldersFound,
-                            SavedFolders = summary.SavedFolders,
-                            SkippedFolders = summary.SkippedFolders,
-                            CurrentPath = directory
-                        });
-                    }
+                    ReportProgressIfNeeded(progress, ref lastProgressReport, summary, directory, "폴더 탐색 중");
                 }
+
+                scanLog.Add($"루트 스캔 완료: {root} / {rootStopwatch.Elapsed:mm\\:ss\\.fff}");
             }
 
             progress?.Report(new ScanProgress
             {
+                Stage = "스캔 완료",
                 FoldersVisited = summary.FoldersVisited,
                 ImageFoldersFound = summary.ImageFoldersFound,
                 SavedFolders = summary.SavedFolders,
                 SkippedFolders = summary.SkippedFolders,
                 CurrentPath = null
             });
-            scanLog.Add($"스캔 완료: 방문 폴더 {summary.FoldersVisited}개, 이미지 폴더 {summary.ImageFoldersFound}개, 저장 {summary.SavedFolders}개, 변경 없음 {summary.SkippedFolders}개");
+            scanLog.Add($"스캔 완료: 방문 폴더 {summary.FoldersVisited}개, 이미지 폴더 {summary.ImageFoldersFound}개, 저장 {summary.SavedFolders}개, 변경 없음 {summary.SkippedFolders}개 / {stopwatch.Elapsed:mm\\:ss\\.fff}");
             return summary;
         }, cancellationToken);
+    }
+
+    private static void ReportProgressIfNeeded(IProgress<ScanProgress>? progress, ref DateTime lastProgressReport, ScanSummary summary, string directory, string stage)
+    {
+        var now = DateTime.Now;
+        if ((now - lastProgressReport).TotalMilliseconds < 150)
+        {
+            return;
+        }
+
+        lastProgressReport = now;
+        progress?.Report(new ScanProgress
+        {
+            Stage = stage,
+            FoldersVisited = summary.FoldersVisited,
+            ImageFoldersFound = summary.ImageFoldersFound,
+            SavedFolders = summary.SavedFolders,
+            SkippedFolders = summary.SkippedFolders,
+            CurrentPath = directory
+        });
     }
 
     private static IEnumerable<string> EnumerateDirectoriesSafe(string root, ScanLog scanLog)
@@ -181,12 +215,24 @@ public sealed class FolderScanner
             return Directory.GetFiles(directory)
                 .Select(path => new FileInfo(path))
                 .Where(file => ImageExtensions.Contains(file.Extension))
-                .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(file => file.Name, NaturalStringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
         catch
         {
             return [];
+        }
+    }
+
+    private static DateTime GetDirectoryModifiedAt(string directory)
+    {
+        try
+        {
+            return Directory.GetLastWriteTime(directory);
+        }
+        catch
+        {
+            return DateTime.MinValue;
         }
     }
 }

@@ -7,7 +7,9 @@ public sealed class SettingsForm : Form
     private readonly ListBox rootListBox = new();
     private readonly ListBox tagListBox = new();
     private readonly Button addRootButton = new();
+    private readonly Button addIncomingRootButton = new();
     private readonly Button deleteRootButton = new();
+    private readonly Button renameRootButton = new();
     private readonly Button openDatabaseFolderButton = new();
     private readonly Button openLogFolderButton = new();
     private readonly Button exportDuplicatesButton = new();
@@ -15,9 +17,14 @@ public sealed class SettingsForm : Form
     private readonly Button backupButton = new();
     private readonly Button restoreButton = new();
     private readonly Button cleanupMissingButton = new();
+    private readonly Button refreshPathStatusButton = new();
     private readonly Button cleanupThumbnailsButton = new();
     private readonly Button inspectSeriesButton = new();
+    private readonly Button inspectDuplicateNamesButton = new();
     private readonly Button optimizeDatabaseButton = new();
+    private readonly CheckBox autoRefreshPathStatusCheckBox = new();
+    private readonly NumericUpDown partialDuplicateThresholdBox = new();
+    private readonly ComboBox languageComboBox = new();
     private readonly Button renameTagButton = new();
     private readonly Button deleteTagButton = new();
     private CancellationTokenSource? duplicateExportCancellationTokenSource;
@@ -27,13 +34,15 @@ public sealed class SettingsForm : Form
         this.database = database;
         this.refreshMainWindow = refreshMainWindow;
 
-        Text = "설정";
+        Text = Localization.T("settings.title");
+        AppIcons.ApplyTo(this);
         Width = 660;
         Height = 600;
         MinimumSize = new Size(560, 480);
         StartPosition = FormStartPosition.CenterParent;
 
         BuildUi();
+        ApplyLocalization();
         LoadRoots();
         LoadTags();
     }
@@ -50,10 +59,14 @@ public sealed class SettingsForm : Form
         var maintenancePage = new TabPage("유지관리");
         var tagsPage = new TabPage("태그");
 
-        addRootButton.Text = "루트 추가";
-        addRootButton.Click += (_, _) => AddRoot();
+        addRootButton.Text = "메인 루트 추가";
+        addRootButton.Click += (_, _) => AddRoot(RootKind.Main);
+        addIncomingRootButton.Text = "신규 루트 추가";
+        addIncomingRootButton.Click += (_, _) => AddRoot(RootKind.Incoming);
         deleteRootButton.Text = "루트 삭제";
         deleteRootButton.Click += (_, _) => DeleteSelectedRoots();
+        renameRootButton.Text = "이름 변경";
+        renameRootButton.Click += (_, _) => RenameSelectedRoot();
 
         var rootsLayout = new TableLayoutPanel
         {
@@ -65,7 +78,7 @@ public sealed class SettingsForm : Form
         rootsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
         rootsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         rootsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        rootsLayout.Controls.Add(CreateButtonPanel(addRootButton, deleteRootButton), 0, 0);
+        rootsLayout.Controls.Add(CreateButtonPanel(addRootButton, addIncomingRootButton, renameRootButton, deleteRootButton), 0, 0);
         rootsLayout.Controls.Add(new Label
         {
             Text = "루트 경로",
@@ -85,7 +98,7 @@ public sealed class SettingsForm : Form
         openDatabaseFolderButton.Click += (_, _) => OpenDatabaseFolder();
         openLogFolderButton.Text = "로그 위치";
         openLogFolderButton.Click += (_, _) => OpenLogFolder();
-        exportDuplicatesButton.Text = "중복 내보내기";
+        exportDuplicatesButton.Text = "중복 폴더";
         exportDuplicatesButton.Click += async (_, _) => await ExportDuplicatesAsync();
         openExportFolderButton.Text = "내보내기 위치";
         openExportFolderButton.Click += (_, _) => OpenExportFolder();
@@ -94,50 +107,76 @@ public sealed class SettingsForm : Form
         restoreButton.Text = "복원";
         restoreButton.Height = 30;
         restoreButton.Click += async (_, _) => await RestoreFileAsync();
+        partialDuplicateThresholdBox.Minimum = 50;
+        partialDuplicateThresholdBox.Maximum = 100;
+        partialDuplicateThresholdBox.Value = Math.Clamp(AppSettings.Current.PartialDuplicateThresholdPercent, 50, 100);
+        partialDuplicateThresholdBox.Width = 70;
+        partialDuplicateThresholdBox.ValueChanged += (_, _) =>
+        {
+            AppSettings.Current.PartialDuplicateThresholdPercent = (int)partialDuplicateThresholdBox.Value;
+            AppSettings.Save();
+        };
 
         var fileLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
-            RowCount = 2,
+            RowCount = 4,
             ColumnCount = 1
         };
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
+        fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         fileLayout.Controls.Add(CreateButtonPanel(openDatabaseFolderButton, openLogFolderButton, openExportFolderButton, exportDuplicatesButton, backupButton, restoreButton), 0, 0);
+        fileLayout.Controls.Add(CreatePartialDuplicateThresholdPanel(), 0, 1);
+        fileLayout.Controls.Add(CreateLanguagePanel(), 0, 2);
         fileLayout.Controls.Add(new Label
         {
-            Text = "DB와 설정 파일 백업/복원, 중복 이미지 내보내기를 관리합니다.",
+            Text = "DB와 설정 파일 백업/복원, 중복 폴더 내보내기를 관리합니다. 부분 중복 기준은 중복 폴더 검사에 사용됩니다.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.TopLeft
-        }, 0, 1);
+        }, 0, 3);
         filePage.Controls.Add(fileLayout);
 
         cleanupMissingButton.Text = "누락 정리";
         cleanupMissingButton.Click += async (_, _) => await CleanupMissingAsync();
+        refreshPathStatusButton.Text = "경로 확인";
+        refreshPathStatusButton.Click += async (_, _) => await RefreshPathStatusAsync();
         cleanupThumbnailsButton.Text = "썸네일 정리";
         cleanupThumbnailsButton.Click += async (_, _) => await CleanupThumbnailsAsync();
         inspectSeriesButton.Text = "묶음 검사";
         inspectSeriesButton.Click += async (_, _) => await InspectSeriesAsync();
+        inspectDuplicateNamesButton.Text = "이름 중복";
+        inspectDuplicateNamesButton.Click += async (_, _) => await InspectDuplicateNamesAsync();
         optimizeDatabaseButton.Text = "DB 최적화";
         optimizeDatabaseButton.Click += async (_, _) => await OptimizeDatabaseAsync();
-
+        autoRefreshPathStatusCheckBox.Text = "스캔 후 경로 확인";
+        autoRefreshPathStatusCheckBox.AutoSize = true;
+        autoRefreshPathStatusCheckBox.Checked = AppSettings.Current.AutoRefreshPathStatusAfterScan;
+        autoRefreshPathStatusCheckBox.CheckedChanged += (_, _) =>
+        {
+            AppSettings.Current.AutoRefreshPathStatusAfterScan = autoRefreshPathStatusCheckBox.Checked;
+            AppSettings.Save();
+        };
         var maintenanceLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
-            RowCount = 2,
+            RowCount = 3,
             ColumnCount = 1
         };
         maintenanceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 50));
+        maintenanceLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         maintenanceLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        maintenanceLayout.Controls.Add(CreateButtonPanel(cleanupMissingButton, cleanupThumbnailsButton, inspectSeriesButton, optimizeDatabaseButton), 0, 0);
+        maintenanceLayout.Controls.Add(CreateButtonPanel(cleanupMissingButton, refreshPathStatusButton, cleanupThumbnailsButton, inspectSeriesButton, inspectDuplicateNamesButton, optimizeDatabaseButton), 0, 0);
+        maintenanceLayout.Controls.Add(autoRefreshPathStatusCheckBox, 0, 1);
         maintenanceLayout.Controls.Add(new Label
         {
             Text = "오래 걸릴 수 있는 작업은 진행도 창을 표시합니다.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.TopLeft
-        }, 0, 1);
+        }, 0, 2);
         maintenancePage.Controls.Add(maintenanceLayout);
 
         var tagLabel = new Label
@@ -229,12 +268,85 @@ public sealed class SettingsForm : Form
         return panel;
     }
 
+    private Control CreatePartialDuplicateThresholdPanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        panel.Controls.Add(new Label
+        {
+            Text = "부분 중복 기준",
+            AutoSize = true,
+            Padding = new Padding(0, 5, 8, 0)
+        });
+        panel.Controls.Add(partialDuplicateThresholdBox);
+        panel.Controls.Add(new Label
+        {
+            Text = "%",
+            AutoSize = true,
+            Padding = new Padding(4, 5, 0, 0)
+        });
+        return panel;
+    }
+
+    private Control CreateLanguagePanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        panel.Controls.Add(new Label
+        {
+            Text = Localization.T("settings.language"),
+            AutoSize = true,
+            Padding = new Padding(0, 7, 8, 0)
+        });
+
+        languageComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        languageComboBox.Width = 160;
+        var languages = Localization.GetLanguages();
+        languageComboBox.Items.AddRange(languages.Cast<object>().ToArray());
+        var selectedLanguage = languages.FindIndex(language => string.Equals(language.Code, AppSettings.Current.LanguageCode, StringComparison.OrdinalIgnoreCase));
+        languageComboBox.SelectedIndex = selectedLanguage >= 0 ? selectedLanguage : 0;
+        languageComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (languageComboBox.SelectedItem is not LanguageInfo language)
+            {
+                return;
+            }
+
+            AppSettings.Current.LanguageCode = language.Code;
+            AppSettings.Save();
+            Localization.Initialize(language.Code);
+            ApplyLocalization();
+            refreshMainWindow();
+        };
+        panel.Controls.Add(languageComboBox);
+        return panel;
+    }
+
+    private void ApplyLocalization()
+    {
+        Localization.ApplyTo(this);
+        Text = Localization.T("settings.title");
+    }
+
     private void LoadRoots()
     {
         rootListBox.Items.Clear();
-        foreach (var rootPath in database.GetRoots())
+        foreach (var rootPath in database.GetRoots(RootKind.Main))
         {
-            rootListBox.Items.Add(rootPath);
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Main));
+        }
+
+        foreach (var rootPath in database.GetRoots(RootKind.Incoming))
+        {
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Incoming));
         }
     }
 
@@ -247,11 +359,11 @@ public sealed class SettingsForm : Form
         }
     }
 
-    private void AddRoot()
+    private void AddRoot(RootKind kind)
     {
         using var dialog = new FolderBrowserDialog
         {
-            Description = "이미지 라이브러리 루트 폴더를 선택하세요",
+            Description = kind == RootKind.Incoming ? "신규등록 루트 폴더를 선택하세요" : "메인 라이브러리 루트 폴더를 선택하세요",
             UseDescriptionForTitle = true
         };
 
@@ -260,14 +372,14 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        database.AddRoot(dialog.SelectedPath);
+        database.AddRoot(dialog.SelectedPath, kind);
         LoadRoots();
         refreshMainWindow();
     }
 
     private void DeleteSelectedRoots()
     {
-        var selectedRoots = rootListBox.SelectedItems.Cast<string>().ToList();
+        var selectedRoots = rootListBox.SelectedItems.Cast<RootListItem>().ToList();
         if (selectedRoots.Count == 0)
         {
             return;
@@ -285,9 +397,63 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        database.DeleteRoots(selectedRoots);
+        database.DeleteRoots(selectedRoots.Select(root => root.Path));
         LoadRoots();
         refreshMainWindow();
+    }
+
+    private void RenameSelectedRoot()
+    {
+        if (rootListBox.SelectedItems.Count != 1 || rootListBox.SelectedItem is not RootListItem root)
+        {
+            MessageBox.Show(this, "이름을 변경할 루트를 하나만 선택하세요.", "루트 이름 변경", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (!Directory.Exists(root.Path))
+        {
+            MessageBox.Show(this, "실제 폴더가 존재하지 않아 이름을 변경할 수 없습니다.", "루트 이름 변경", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var directory = new DirectoryInfo(root.Path);
+        var newName = PromptText("루트 이름 변경", "새 폴더 이름", directory.Name);
+        if (string.IsNullOrWhiteSpace(newName) || string.Equals(newName.Trim(), directory.Name, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        var parentPath = directory.Parent?.FullName;
+        if (string.IsNullOrWhiteSpace(parentPath))
+        {
+            MessageBox.Show(this, "드라이브 루트는 이름을 변경할 수 없습니다.", "루트 이름 변경", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var newPath = Path.Combine(parentPath, newName.Trim());
+        if (Directory.Exists(newPath) || File.Exists(newPath))
+        {
+            MessageBox.Show(this, "같은 이름의 폴더나 파일이 이미 있습니다.", "루트 이름 변경", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var result = MessageBox.Show(this, $"실제 폴더 이름과 DB 경로를 함께 변경합니다.\n\n{root.Path}\n→ {newPath}", "루트 이름 변경", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Move(root.Path, newPath);
+            database.RenameRootPath(root.Path, newPath);
+            LoadRoots();
+            refreshMainWindow();
+        }
+        catch (Exception exception)
+        {
+            MessageBox.Show(this, exception.Message, "루트 이름 변경 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void RenameTag()
@@ -381,7 +547,7 @@ public sealed class SettingsForm : Form
         duplicateExportCancellationTokenSource = new CancellationTokenSource();
         using var progressForm = new ScanProgressForm(() => duplicateExportCancellationTokenSource.Cancel())
         {
-            Text = "중복 이미지 내보내기"
+            Text = "중복 폴더 내보내기"
         };
 
         try
@@ -389,19 +555,19 @@ public sealed class SettingsForm : Form
             var exporter = new DuplicateImageExporter(database);
             var progress = new Progress<string>(message => progressForm.UpdateStatus(message));
             progressForm.Show(this);
-            progressForm.UpdateStatus("중복 이미지 확인 중...");
+            progressForm.UpdateStatus("중복 폴더 확인 중...");
             var exportPath = await exporter.ExportAsync(progress, duplicateExportCancellationTokenSource.Token);
 
             if (exportPath is null)
             {
-                MessageBox.Show(this, "중복 이미지가 발견되지 않았습니다. 엑셀 파일은 만들지 않았습니다.", "중복 이미지", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "중복 폴더가 발견되지 않았습니다. 엑셀 파일은 만들지 않았습니다.", "중복 폴더", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             var result = MessageBox.Show(
                 this,
-                $"중복 이미지 목록을 내보냈습니다.\n\n{exportPath}\n\n파일 위치를 열까요?",
-                "중복 이미지",
+                $"중복 폴더 목록을 내보냈습니다.\n\n{exportPath}\n\n파일 위치를 열까요?",
+                "중복 폴더",
                 MessageBoxButtons.YesNo,
                 MessageBoxIcon.Information);
 
@@ -412,11 +578,11 @@ public sealed class SettingsForm : Form
         }
         catch (OperationCanceledException)
         {
-            MessageBox.Show(this, "중복 이미지 내보내기를 취소했습니다.", "중복 이미지", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, "중복 폴더 내보내기를 취소했습니다.", "중복 폴더", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, exception.Message, "중복 이미지 내보내기 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, exception.Message, "중복 폴더 내보내기 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
         {
@@ -600,6 +766,32 @@ public sealed class SettingsForm : Form
         MessageBox.Show(this, $"깨진 썸네일 경로 {count}개를 정리했습니다.", "썸네일 정리", MessageBoxButtons.OK, MessageBoxIcon.Information);
     }
 
+    private async Task RefreshPathStatusAsync()
+    {
+        using var cancellationTokenSource = new CancellationTokenSource();
+        using var progressForm = new ScanProgressForm(() => cancellationTokenSource.Cancel()) { Text = "경로 확인" };
+        int missingCount;
+        try
+        {
+            progressForm.Show(this);
+            progressForm.UpdateStatus("폴더 경로 존재 여부를 확인하는 중...");
+            var progress = new Progress<string>(message => progressForm.UpdateStatus(message));
+            missingCount = await Task.Run(() => database.RefreshFolderPathStatus(progress, cancellationTokenSource.Token), cancellationTokenSource.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            MessageBox.Show(this, "경로 확인을 취소했습니다.", "경로 확인", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        finally
+        {
+            progressForm.Close();
+        }
+
+        refreshMainWindow();
+        MessageBox.Show(this, $"깨진 경로 {missingCount}개를 표시했습니다. 메인 화면의 빠른 필터 `깨진 경로`에서 확인할 수 있습니다.", "경로 확인", MessageBoxButtons.OK, MessageBoxIcon.Information);
+    }
+
     private async Task InspectSeriesAsync()
     {
         using var progressForm = new ScanProgressForm(() => { }) { Text = "묶음 품질 검사" };
@@ -622,6 +814,31 @@ public sealed class SettingsForm : Form
         }
 
         using var resultForm = new SeriesQualityIssuesForm(issues);
+        resultForm.ShowDialog(this);
+    }
+
+    private async Task InspectDuplicateNamesAsync()
+    {
+        using var progressForm = new ScanProgressForm(() => { }) { Text = "이름 중복 검사" };
+        List<DuplicateNameGroup> groups;
+        try
+        {
+            progressForm.Show(this);
+            progressForm.UpdateStatus("같은 이름의 폴더를 찾는 중...");
+            groups = await Task.Run(database.GetDuplicateNameGroups);
+        }
+        finally
+        {
+            progressForm.Close();
+        }
+
+        if (groups.Count == 0)
+        {
+            MessageBox.Show(this, "같은 이름으로 등록된 폴더가 없습니다.", "이름 중복", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var resultForm = new DuplicateNameGroupsForm(groups, refreshMainWindow);
         resultForm.ShowDialog(this);
     }
 
@@ -708,7 +925,7 @@ public sealed class SettingsForm : Form
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.RightToLeft
+            FlowDirection = FlowDirection.LeftToRight
         };
 
         var okButton = new Button
@@ -733,5 +950,14 @@ public sealed class SettingsForm : Form
         dialog.CancelButton = cancelButton;
 
         return dialog.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+    }
+
+    private sealed record RootListItem(string Path, RootKind Kind)
+    {
+        public override string ToString()
+        {
+            var kindText = Kind == RootKind.Incoming ? "신규" : "메인";
+            return $"[{kindText}] {Path}";
+        }
     }
 }
