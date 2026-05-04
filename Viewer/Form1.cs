@@ -763,14 +763,70 @@ public sealed class Form1 : Form
             return;
         }
 
-        var message = string.Format(
+        var message = CreateUpdatePromptMessage(result);
+        var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        if (dialogResult == DialogResult.Yes)
+        {
+            await DownloadOrOpenUpdateAsync(result);
+        }
+    }
+
+    private static string CreateUpdatePromptMessage(UpdateCheckResult result)
+    {
+        if (!string.IsNullOrWhiteSpace(result.AssetDownloadUrl))
+        {
+            return string.Format(
+                Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n파일: {2}\n\n업데이트 파일을 다운로드할까요?"),
+                result.CurrentVersion,
+                result.LatestVersion,
+                result.AssetName);
+        }
+
+        return string.Format(
             Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?"),
             result.CurrentVersion,
             result.LatestVersion);
-        var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-        if (dialogResult == DialogResult.Yes && !string.IsNullOrWhiteSpace(result.ReleasePageUrl))
+    }
+
+    private async Task DownloadOrOpenUpdateAsync(UpdateCheckResult result)
+    {
+        if (string.IsNullOrWhiteSpace(result.AssetDownloadUrl))
         {
-            UpdateService.OpenReleasePage(result.ReleasePageUrl);
+            if (!string.IsNullOrWhiteSpace(result.ReleasePageUrl))
+            {
+                UpdateService.OpenReleasePage(result.ReleasePageUrl);
+            }
+
+            return;
+        }
+
+        using var progressForm = new ScanProgressForm(() => { }) { Text = Localization.T("업데이트 다운로드") };
+        try
+        {
+            progressForm.Show(this);
+            var progress = new Progress<string>(message => progressForm.UpdateStatus(message));
+            var downloadPath = await UpdateService.DownloadUpdateAsync(result, progress);
+            progressForm.Close();
+
+            var openResult = MessageBox.Show(
+                this,
+                string.Format(Localization.T("업데이트 파일을 다운로드했습니다.\n\n{0}\n\n지금 업데이트를 적용할까요?\n앱이 종료된 뒤 업데이트 후 다시 실행됩니다."), downloadPath),
+                Localization.T("업데이트 다운로드"),
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+            if (openResult == DialogResult.Yes)
+            {
+                UpdateService.LaunchUpdater(downloadPath);
+                Application.Exit();
+                return;
+            }
+
+            UpdateService.OpenUpdatesFolder();
+        }
+        catch (Exception exception)
+        {
+            progressForm.Close();
+            MessageBox.Show(this, exception.Message, Localization.T("업데이트 다운로드 실패"), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

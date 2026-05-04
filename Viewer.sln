@@ -5,6 +5,8 @@ VisualStudioVersion = 17.14.37203.1 d17.14
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Viewer", "Viewer\Viewer.csproj", "{47B73381-A501-4C20-B6F1-512088F1B5FB}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Updater", "Updater\Updater.csproj", "{8D77DC9C-4F1B-4F24-9FCB-8AEB660CCB18}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,6 +17,10 @@ Global
 		{47B73381-A501-4C20-B6F1-512088F1B5FB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{47B73381-A501-4C20-B6F1-512088F1B5FB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{47B73381-A501-4C20-B6F1-512088F1B5FB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8D77DC9C-4F1B-4F24-9FCB-8AEB660CCB18}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D77DC9C-4F1B-4F24-9FCB-8AEB660CCB18}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D77DC9C-4F1B-4F24-9FCB-8AEB660CCB18}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D77DC9C-4F1B-4F24-9FCB-8AEB660CCB18}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

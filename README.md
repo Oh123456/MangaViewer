@@ -17,6 +17,7 @@ WinForms + SQLite 기반의 Windows 전용 로컬 이미지 폴더 관리/뷰어
 - 중복 이름 폴더 확인, 중복 폴더 엑셀 내보내기
 - DB/설정 백업 및 복원
 - 한국어/영어 다국어 지원
+- GitHub Releases 기반 업데이트 확인 및 자동 적용
 
 ## 실행 환경
 
@@ -98,6 +99,7 @@ Viewer is a Windows-only local image folder manager and viewer built with WinFor
 - Duplicate name folder checker and duplicate folder Excel export
 - DB/settings backup and restore
 - Korean and English localization
+- GitHub Releases based update checking and automatic apply
 
 ## Requirements
 

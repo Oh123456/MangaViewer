@@ -194,5 +194,15 @@
   "릴리즈 정보를 읽을 수 없습니다.": "Could not read release information.",
   "현재 최신 버전입니다.\n\n현재 버전: {0}": "You are up to date.\n\nCurrent version: {0}",
   "새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?": "A new version is available.\n\nCurrent version: {0}\nLatest version: {1}\n\nOpen the release page?",
-  "예: https://api.github.com/repos/OWNER/REPO/releases/latest": "Example: https://api.github.com/repos/OWNER/REPO/releases/latest"
+  "예: https://api.github.com/repos/OWNER/REPO/releases/latest": "Example: https://api.github.com/repos/OWNER/REPO/releases/latest",
+  "새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n파일: {2}\n\n업데이트 파일을 다운로드할까요?": "A new version is available.\n\nCurrent version: {0}\nLatest version: {1}\nFile: {2}\n\nDownload the update file?",
+  "다운로드 가능한 업데이트 파일이 없습니다.": "No downloadable update file is available.",
+  "업데이트 파일 다운로드 중...": "Downloading update file...",
+  "업데이트 다운로드 완료": "Update download complete",
+  "업데이트 다운로드": "Update Download",
+  "업데이트 다운로드 실패": "Update Download Failed",
+  "업데이트 파일을 다운로드했습니다.\n\n{0}\n\n폴더를 열까요?": "The update file has been downloaded.\n\n{0}\n\nOpen the folder?",
+  "업데이트 파일을 다운로드했습니다.\n\n{0}\n\n지금 업데이트를 적용할까요?\n앱이 종료된 뒤 업데이트 후 다시 실행됩니다.": "The update file has been downloaded.\n\n{0}\n\nApply the update now?\nThe app will close, update, and restart.",
+  "업데이트 파일을 찾을 수 없습니다.": "Could not find the update file.",
+  "Updater.exe를 찾을 수 없습니다.": "Could not find Updater.exe."
 }

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Windows.Forms;
 
 namespace Viewer;
 
@@ -12,6 +13,8 @@ public sealed record UpdateCheckResult(
     string? LatestVersion,
     string? ReleaseName,
     string? ReleasePageUrl,
+    string? AssetName,
+    string? AssetDownloadUrl,
     string? Body,
     string? ErrorMessage);
 
@@ -44,7 +47,7 @@ public static class UpdateService
         var releaseApiUrl = AppSettings.Current.UpdateReleaseApiUrl.Trim();
         if (string.IsNullOrWhiteSpace(releaseApiUrl))
         {
-            return new UpdateCheckResult(false, false, CurrentVersion, null, null, null, null, Localization.T("업데이트 URL이 설정되지 않았습니다."));
+            return new UpdateCheckResult(false, false, CurrentVersion, null, null, null, null, null, null, Localization.T("업데이트 URL이 설정되지 않았습니다."));
         }
 
         try
@@ -58,17 +61,44 @@ public static class UpdateService
             var release = await JsonSerializer.DeserializeAsync<GitHubReleaseResponse>(stream, JsonOptions, cancellationToken);
             if (release is null || string.IsNullOrWhiteSpace(release.TagName))
             {
-                return new UpdateCheckResult(true, false, CurrentVersion, null, null, null, null, Localization.T("릴리즈 정보를 읽을 수 없습니다."));
+                return new UpdateCheckResult(true, false, CurrentVersion, null, null, null, null, null, null, Localization.T("릴리즈 정보를 읽을 수 없습니다."));
             }
 
             var latestVersion = NormalizeVersionText(release.TagName);
             var hasUpdate = IsNewerVersion(latestVersion, CurrentVersion);
-            return new UpdateCheckResult(true, hasUpdate, CurrentVersion, latestVersion, release.Name, release.HtmlUrl, release.Body, null);
+            var asset = PickUpdateAsset(release.Assets);
+            return new UpdateCheckResult(true, hasUpdate, CurrentVersion, latestVersion, release.Name, release.HtmlUrl, asset?.Name, asset?.BrowserDownloadUrl, release.Body, null);
         }
         catch (Exception exception)
         {
-            return new UpdateCheckResult(true, false, CurrentVersion, null, null, null, null, exception.Message);
+            return new UpdateCheckResult(true, false, CurrentVersion, null, null, null, null, null, null, exception.Message);
         }
+    }
+
+    public static async Task<string> DownloadUpdateAsync(UpdateCheckResult update, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(update.AssetDownloadUrl))
+        {
+            throw new InvalidOperationException(Localization.T("다운로드 가능한 업데이트 파일이 없습니다."));
+        }
+
+        var updatesDirectory = Path.Combine(AppContext.BaseDirectory, "Updates");
+        Directory.CreateDirectory(updatesDirectory);
+
+        var fileName = string.IsNullOrWhiteSpace(update.AssetName)
+            ? $"Viewer_{update.LatestVersion}.zip"
+            : SanitizeFileName(update.AssetName);
+        var destinationPath = Path.Combine(updatesDirectory, fileName);
+
+        progress?.Report(Localization.T("업데이트 파일 다운로드 중..."));
+        using var httpClient = new HttpClient();
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Viewer-UpdateDownloader/1.0");
+        await using var sourceStream = await httpClient.GetStreamAsync(update.AssetDownloadUrl, cancellationToken);
+        await using var destinationStream = File.Create(destinationPath);
+        await sourceStream.CopyToAsync(destinationStream, cancellationToken);
+        progress?.Report(Localization.T("업데이트 다운로드 완료"));
+
+        return destinationPath;
     }
 
     public static void OpenReleasePage(string releasePageUrl)
@@ -78,6 +108,87 @@ public static class UpdateService
             FileName = releasePageUrl,
             UseShellExecute = true
         });
+    }
+
+    public static void OpenUpdatesFolder()
+    {
+        var updatesDirectory = Path.Combine(AppContext.BaseDirectory, "Updates");
+        Directory.CreateDirectory(updatesDirectory);
+        Process.Start(new ProcessStartInfo
+        {
+            FileName = updatesDirectory,
+            UseShellExecute = true
+        });
+    }
+
+    public static void LaunchUpdater(string zipPath)
+    {
+        if (string.IsNullOrWhiteSpace(zipPath) || !File.Exists(zipPath))
+        {
+            throw new FileNotFoundException(Localization.T("업데이트 파일을 찾을 수 없습니다."), zipPath);
+        }
+
+        var appDirectory = AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var updaterSourcePath = Path.Combine(appDirectory, "Updater.exe");
+        if (!File.Exists(updaterSourcePath))
+        {
+            throw new FileNotFoundException(Localization.T("Updater.exe를 찾을 수 없습니다."), updaterSourcePath);
+        }
+
+        var updaterRuntimeDirectory = Path.Combine(appDirectory, "Updates", "UpdaterRuntime");
+        if (Directory.Exists(updaterRuntimeDirectory))
+        {
+            Directory.Delete(updaterRuntimeDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(updaterRuntimeDirectory);
+        foreach (var updaterFile in Directory.GetFiles(appDirectory, "Updater.*"))
+        {
+            File.Copy(updaterFile, Path.Combine(updaterRuntimeDirectory, Path.GetFileName(updaterFile)), overwrite: true);
+        }
+
+        var updaterRuntimePath = Path.Combine(updaterRuntimeDirectory, "Updater.exe");
+        var executableName = Path.GetFileName(Application.ExecutablePath);
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = updaterRuntimePath,
+            WorkingDirectory = updaterRuntimeDirectory,
+            UseShellExecute = true
+        };
+        startInfo.ArgumentList.Add("--zip");
+        startInfo.ArgumentList.Add(zipPath);
+        startInfo.ArgumentList.Add("--app-dir");
+        startInfo.ArgumentList.Add(appDirectory);
+        startInfo.ArgumentList.Add("--exe");
+        startInfo.ArgumentList.Add(executableName);
+        startInfo.ArgumentList.Add("--pid");
+        startInfo.ArgumentList.Add(Environment.ProcessId.ToString());
+
+        Process.Start(startInfo);
+    }
+
+    private static GitHubReleaseAsset? PickUpdateAsset(List<GitHubReleaseAsset>? assets)
+    {
+        if (assets is null || assets.Count == 0)
+        {
+            return null;
+        }
+
+        return assets
+            .Where(asset => !string.IsNullOrWhiteSpace(asset.BrowserDownloadUrl))
+            .OrderByDescending(asset => asset.Name?.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) == true)
+            .ThenByDescending(asset => asset.Name?.Contains("Viewer", StringComparison.OrdinalIgnoreCase) == true)
+            .FirstOrDefault();
+    }
+
+    private static string SanitizeFileName(string fileName)
+    {
+        foreach (var invalidChar in Path.GetInvalidFileNameChars())
+        {
+            fileName = fileName.Replace(invalidChar, '_');
+        }
+
+        return fileName;
     }
 
     private static bool IsNewerVersion(string latestVersion, string currentVersion)
@@ -135,5 +246,15 @@ public static class UpdateService
         public string? HtmlUrl { get; set; }
 
         public string? Body { get; set; }
+
+        public List<GitHubReleaseAsset>? Assets { get; set; }
+    }
+
+    private sealed class GitHubReleaseAsset
+    {
+        public string? Name { get; set; }
+
+        [JsonPropertyName("browser_download_url")]
+        public string? BrowserDownloadUrl { get; set; }
     }
 }
