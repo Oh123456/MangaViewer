@@ -25,6 +25,7 @@ public sealed class SettingsForm : Form
     private readonly CheckBox autoRefreshPathStatusCheckBox = new();
     private readonly NumericUpDown partialDuplicateThresholdBox = new();
     private readonly ComboBox languageComboBox = new();
+    private readonly ComboBox viewerImageLoadingModeComboBox = new();
     private readonly CheckBox autoCheckForUpdatesCheckBox = new();
     private readonly TextBox updateReleaseApiUrlBox = new();
     private readonly Button checkUpdatesButton = new();
@@ -125,22 +126,24 @@ public sealed class SettingsForm : Form
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
-            RowCount = 4,
+            RowCount = 5,
             ColumnCount = 1
         };
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 92));
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        fileLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         fileLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         fileLayout.Controls.Add(CreateButtonPanel(openDatabaseFolderButton, openLogFolderButton, openExportFolderButton, exportDuplicatesButton, backupButton, restoreButton), 0, 0);
         fileLayout.Controls.Add(CreatePartialDuplicateThresholdPanel(), 0, 1);
         fileLayout.Controls.Add(CreateLanguagePanel(), 0, 2);
+        fileLayout.Controls.Add(CreateViewerImageLoadingModePanel(), 0, 3);
         fileLayout.Controls.Add(new Label
         {
             Text = "DB와 설정 파일 백업/복원, 중복 폴더 내보내기를 관리합니다. 부분 중복 기준은 중복 폴더 검사에 사용됩니다.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.TopLeft
-        }, 0, 3);
+        }, 0, 4);
         filePage.Controls.Add(fileLayout);
 
         cleanupMissingButton.Text = "누락 정리";
@@ -384,6 +387,34 @@ public sealed class SettingsForm : Form
             refreshMainWindow();
         };
         panel.Controls.Add(languageComboBox);
+        return panel;
+    }
+
+    private Control CreateViewerImageLoadingModePanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+        panel.Controls.Add(new Label
+        {
+            Text = "뷰어 로딩",
+            AutoSize = true,
+            Padding = new Padding(0, 7, 8, 0)
+        });
+
+        viewerImageLoadingModeComboBox.DropDownStyle = ComboBoxStyle.DropDownList;
+        viewerImageLoadingModeComboBox.Width = 160;
+        viewerImageLoadingModeComboBox.Items.AddRange(["비동기식", "동기식"]);
+        viewerImageLoadingModeComboBox.SelectedIndex = AppSettings.Current.ViewerAsyncImageLoading ? 0 : 1;
+        viewerImageLoadingModeComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            AppSettings.Current.ViewerAsyncImageLoading = viewerImageLoadingModeComboBox.SelectedIndex == 0;
+            AppSettings.Save();
+        };
+        panel.Controls.Add(viewerImageLoadingModeComboBox);
         return panel;
     }
 

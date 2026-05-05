@@ -24,8 +24,11 @@ public sealed class ImageViewerForm : Form
     private readonly List<Button> toolbarButtons = [];
     private readonly bool enableFolderNavigation;
     private readonly List<long> folderOrder;
+    private readonly bool asyncImageLoading = AppSettings.Current.ViewerAsyncImageLoading;
     private int index;
     private Image? currentImage;
+    private CancellationTokenSource? imageLoadCancellationTokenSource;
+    private int imageLoadRequestId;
     private bool isFullscreen;
     private FormBorderStyle previousBorderStyle;
     private FormWindowState previousWindowState;
@@ -177,7 +180,12 @@ public sealed class ImageViewerForm : Form
         KeyDown += OnKeyDown;
         MouseWheel += (_, mouseEventArgs) => MoveImage(mouseEventArgs.Delta < 0 ? 1 : -1);
         FormClosing += (_, _) => SaveWindowPlacement();
-        FormClosed += (_, _) => currentImage?.Dispose();
+        FormClosed += (_, _) =>
+        {
+            imageLoadCancellationTokenSource?.Cancel();
+            imageLoadCancellationTokenSource?.Dispose();
+            currentImage?.Dispose();
+        };
         Shown += (_, _) =>
         {
             if (lastFullscreen && !isFullscreen)
@@ -362,6 +370,44 @@ public sealed class ImageViewerForm : Form
 
     private void LoadCurrentImage()
     {
+        if (asyncImageLoading)
+        {
+            QueueLoadCurrentImage();
+            return;
+        }
+
+        LoadCurrentImageSync();
+    }
+
+    private void QueueLoadCurrentImage()
+    {
+        if (images.Count == 0)
+        {
+            currentImage?.Dispose();
+            currentImage = null;
+            pictureBox.Image = null;
+            statusLabel.Text = Localization.T("이미지가 없습니다.");
+            return;
+        }
+
+        imageLoadCancellationTokenSource?.Cancel();
+        imageLoadCancellationTokenSource?.Dispose();
+        imageLoadCancellationTokenSource = new CancellationTokenSource();
+        var cancellationToken = imageLoadCancellationTokenSource.Token;
+        var requestId = ++imageLoadRequestId;
+        var image = images[index];
+        UpdateNavigationState();
+        statusLabel.Text = $"{GetFolderPositionText(image)}{image.FileName}  {Localization.T("로딩 중...")}";
+
+        _ = LoadImageAsync(image, requestId, cancellationToken);
+    }
+
+    private void LoadCurrentImageSync()
+    {
+        imageLoadCancellationTokenSource?.Cancel();
+        imageLoadCancellationTokenSource?.Dispose();
+        imageLoadCancellationTokenSource = null;
+
         currentImage?.Dispose();
         currentImage = null;
         pictureBox.Image = null;
@@ -373,6 +419,7 @@ public sealed class ImageViewerForm : Form
         }
 
         var image = images[index];
+        UpdateNavigationState();
         try
         {
             currentImage = ImageLoader.LoadBitmapCopy(image.Path);
@@ -385,7 +432,44 @@ public sealed class ImageViewerForm : Form
             ImageLoader.LogFailure("image_load", ImageLoader.CreateFailure(image.Path, exception));
             statusLabel.Text = $"{Localization.T("이미지를 열 수 없습니다")}: {exception.Message}";
         }
+    }
 
+    private async Task LoadImageAsync(ImageItem image, int requestId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var loadedImage = await Task.Run(() => ImageLoader.LoadBitmapCopy(image.Path), cancellationToken);
+            if (cancellationToken.IsCancellationRequested || requestId != imageLoadRequestId)
+            {
+                loadedImage.Dispose();
+                return;
+            }
+
+            var previousImage = currentImage;
+            currentImage = loadedImage;
+            pictureBox.Image = loadedImage;
+            previousImage?.Dispose();
+
+            var folderPositionText = GetFolderPositionText(image);
+            statusLabel.Text = $"{folderPositionText}{image.FileName}  {loadedImage.Width}x{loadedImage.Height}";
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (cancellationToken.IsCancellationRequested || requestId != imageLoadRequestId)
+            {
+                return;
+            }
+
+            ImageLoader.LogFailure("image_load", ImageLoader.CreateFailure(image.Path, exception));
+            statusLabel.Text = $"{Localization.T("이미지를 열 수 없습니다")}: {exception.Message}";
+        }
+    }
+
+    private void UpdateNavigationState()
+    {
         previousButton.Enabled = index > 0;
         nextButton.Enabled = index < images.Count - 1;
         firstFolderButton.Enabled = enableFolderNavigation && folderOrder.Count > 1 && images[index].FolderId != folderOrder.First();
