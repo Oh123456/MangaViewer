@@ -33,6 +33,8 @@ public sealed class Form1 : Form
     private readonly NumericUpDown seriesOrderBox = new();
     private readonly NumericUpDown scoreBox = new();
     private readonly TextBox tagsBox = new();
+    private readonly ToolStripDropDown tagInputSuggestionDropDown = new();
+    private readonly ListBox tagInputSuggestionListBox = new();
     private readonly TextBox memoBox = new();
     private readonly TextBox pathBox = new();
     private readonly Label statsLabel = new();
@@ -62,6 +64,7 @@ public sealed class Form1 : Form
     private List<FolderItem> randomFolders = [];
     private readonly List<string> activeTagFilters = [];
     private readonly List<string> excludedTagFilters = [];
+    private readonly List<string> allTagNames = [];
     private FolderItem? selectedFolder;
     private bool loadingDetails;
     private bool updatingTagFilterListBox;
@@ -528,7 +531,17 @@ public sealed class Form1 : Form
         AddLabeledControl(panel, "점수", scoreBox, 6);
 
         tagsBox.PlaceholderText = "쉼표로 구분";
+        tagsBox.TextChanged += (_, _) => UpdateTagInputSuggestions();
+        tagsBox.KeyDown += (_, keyEventArgs) => HandleTagInputSuggestionKeyDown(keyEventArgs);
+        tagsBox.Leave += (_, _) => BeginInvoke(() =>
+        {
+            if (!tagInputSuggestionListBox.Focused)
+            {
+                tagInputSuggestionDropDown.Close();
+            }
+        });
         AddLabeledControl(panel, "태그", tagsBox, 7);
+        BuildTagInputSuggestionDropDown();
 
         memoBox.Multiline = true;
         memoBox.ScrollBars = ScrollBars.Vertical;
@@ -1081,6 +1094,23 @@ public sealed class Form1 : Form
             currentPageIndex * pageSize,
             pageSize,
             sortDescending);
+        if (result.TotalCount > 0 && result.Items.Count == 0 && currentPageIndex > 0)
+        {
+            currentPageIndex = Math.Max(0, (result.TotalCount - 1) / pageSize);
+            result = database.GetFoldersPage(
+                mode,
+                sortMode,
+                searchField,
+                searchBox.Text,
+                activeTagFilters,
+                excludedTagFilters,
+                tagFilterMode,
+                quickFilterMode,
+                currentPageIndex * pageSize,
+                pageSize,
+                sortDescending);
+        }
+
         folders = result.Items;
         totalFolderCount = result.TotalCount;
     }
@@ -1397,11 +1427,20 @@ public sealed class Form1 : Form
             return;
         }
 
-        using var dialog = new RandomRecommendForm(candidateCount);
+        using var dialog = new RandomRecommendForm(
+            candidateCount,
+            AppSettings.Current.RandomRecommendCount,
+            AppSettings.Current.RandomRecommendMinImageCount,
+            AppSettings.Current.RandomRecommendMaxImageCount);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
         }
+
+        AppSettings.Current.RandomRecommendCount = dialog.RecommendCount;
+        AppSettings.Current.RandomRecommendMinImageCount = dialog.MinImageCount;
+        AppSettings.Current.RandomRecommendMaxImageCount = dialog.MaxImageCount ?? 0;
+        AppSettings.Save();
 
         var allCandidates = database.GetFolders(
             GetCurrentFolderListMode(),
@@ -2030,6 +2069,8 @@ public sealed class Form1 : Form
     private void LoadTagFilters(IEnumerable<string>? preferredTags = null)
     {
         var tags = database.GetTags();
+        allTagNames.Clear();
+        allTagNames.AddRange(tags);
 
         activeTagFilters.RemoveAll(activeTag => !tags.Contains(activeTag, StringComparer.OrdinalIgnoreCase));
         excludedTagFilters.RemoveAll(excludedTag => !tags.Contains(excludedTag, StringComparer.OrdinalIgnoreCase));
@@ -2658,6 +2699,151 @@ public sealed class Form1 : Form
         excludedTagFilterDropDown.Padding = Padding.Empty;
         excludedTagFilterDropDown.Items.Add(host);
         excludedTagFilterDropDown.AutoClose = true;
+    }
+
+    private void BuildTagInputSuggestionDropDown()
+    {
+        tagInputSuggestionListBox.BorderStyle = BorderStyle.FixedSingle;
+        tagInputSuggestionListBox.IntegralHeight = false;
+        tagInputSuggestionListBox.Height = 150;
+        tagInputSuggestionListBox.MouseClick += (_, _) => ApplySelectedTagSuggestion();
+        tagInputSuggestionListBox.KeyDown += (_, keyEventArgs) => HandleTagInputSuggestionKeyDown(keyEventArgs);
+
+        var host = new ToolStripControlHost(tagInputSuggestionListBox)
+        {
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            AutoSize = false
+        };
+        tagInputSuggestionDropDown.Padding = Padding.Empty;
+        tagInputSuggestionDropDown.Items.Add(host);
+        tagInputSuggestionDropDown.AutoClose = false;
+    }
+
+    private void UpdateTagInputSuggestions()
+    {
+        if (!tagsBox.Focused || allTagNames.Count == 0)
+        {
+            tagInputSuggestionDropDown.Close();
+            return;
+        }
+
+        var token = GetCurrentTagToken();
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            tagInputSuggestionDropDown.Close();
+            return;
+        }
+
+        var existingTags = tagsBox.Text
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Where(tag => !tag.Equals(token, StringComparison.OrdinalIgnoreCase))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var matches = allTagNames
+            .Where(tag => tag.StartsWith(token, StringComparison.OrdinalIgnoreCase) && !existingTags.Contains(tag))
+            .Take(10)
+            .ToList();
+        if (matches.Count == 0)
+        {
+            tagInputSuggestionDropDown.Close();
+            return;
+        }
+
+        tagInputSuggestionListBox.BeginUpdate();
+        tagInputSuggestionListBox.Items.Clear();
+        tagInputSuggestionListBox.Items.AddRange(matches.Cast<object>().ToArray());
+        tagInputSuggestionListBox.SelectedIndex = 0;
+        tagInputSuggestionListBox.EndUpdate();
+
+        var width = Math.Max(tagsBox.Width, 180);
+        var height = Math.Min(10, matches.Count) * Math.Max(tagInputSuggestionListBox.ItemHeight, 18) + 6;
+        tagInputSuggestionListBox.Size = new Size(width, height);
+        if (tagInputSuggestionDropDown.Items[0] is ToolStripControlHost host)
+        {
+            host.Size = tagInputSuggestionListBox.Size;
+        }
+
+        if (!tagInputSuggestionDropDown.Visible)
+        {
+            tagInputSuggestionDropDown.Show(tagsBox, new Point(0, tagsBox.Height));
+        }
+    }
+
+    private void HandleTagInputSuggestionKeyDown(KeyEventArgs keyEventArgs)
+    {
+        if (!tagInputSuggestionDropDown.Visible)
+        {
+            return;
+        }
+
+        if (keyEventArgs.KeyCode == Keys.Down)
+        {
+            tagInputSuggestionListBox.SelectedIndex = Math.Min(tagInputSuggestionListBox.Items.Count - 1, tagInputSuggestionListBox.SelectedIndex + 1);
+            keyEventArgs.Handled = true;
+            keyEventArgs.SuppressKeyPress = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.Up)
+        {
+            tagInputSuggestionListBox.SelectedIndex = Math.Max(0, tagInputSuggestionListBox.SelectedIndex - 1);
+            keyEventArgs.Handled = true;
+            keyEventArgs.SuppressKeyPress = true;
+        }
+        else if (keyEventArgs.KeyCode is Keys.Enter or Keys.Tab)
+        {
+            ApplySelectedTagSuggestion();
+            keyEventArgs.Handled = true;
+            keyEventArgs.SuppressKeyPress = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.Escape)
+        {
+            tagInputSuggestionDropDown.Close();
+            keyEventArgs.Handled = true;
+            keyEventArgs.SuppressKeyPress = true;
+        }
+    }
+
+    private string GetCurrentTagToken()
+    {
+        var selectionStart = Math.Clamp(tagsBox.SelectionStart, 0, tagsBox.Text.Length);
+        var commaIndex = LastCommaBefore(selectionStart);
+        var tokenStart = commaIndex < 0 ? 0 : commaIndex + 1;
+        return tagsBox.Text[tokenStart..selectionStart].Trim();
+    }
+
+    private int LastCommaBefore(int selectionStart)
+    {
+        if (tagsBox.Text.Length == 0 || selectionStart <= 0)
+        {
+            return -1;
+        }
+
+        return tagsBox.Text.LastIndexOf(',', selectionStart - 1);
+    }
+
+    private void ApplySelectedTagSuggestion()
+    {
+        if (tagInputSuggestionListBox.SelectedItem is not string selectedTag)
+        {
+            return;
+        }
+
+        var selectionStart = Math.Clamp(tagsBox.SelectionStart, 0, tagsBox.Text.Length);
+        var tokenStart = LastCommaBefore(selectionStart);
+        tokenStart = tokenStart < 0 ? 0 : tokenStart + 1;
+        while (tokenStart < tagsBox.Text.Length && char.IsWhiteSpace(tagsBox.Text[tokenStart]))
+        {
+            tokenStart++;
+        }
+
+        var tokenEnd = tagsBox.Text.IndexOf(',', selectionStart);
+        tokenEnd = tokenEnd < 0 ? tagsBox.Text.Length : tokenEnd;
+        var prefix = tagsBox.Text[..tokenStart];
+        var suffix = tagsBox.Text[tokenEnd..];
+        var separator = suffix.Length == 0 ? "" : " ";
+        tagsBox.Text = prefix + selectedTag + separator + suffix;
+        tagsBox.SelectionStart = (prefix + selectedTag).Length;
+        tagInputSuggestionDropDown.Close();
+        tagsBox.Focus();
     }
 
     private void ResizeTagFilterDropDown()

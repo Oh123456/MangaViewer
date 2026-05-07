@@ -19,6 +19,9 @@ public sealed class AppSettings
     public string LanguageCode { get; set; } = "kr";
     public bool AutoCheckForUpdates { get; set; } = true;
     public string UpdateReleaseApiUrl { get; set; } = DefaultUpdateReleaseApiUrl;
+    public int RandomRecommendCount { get; set; } = 10;
+    public int RandomRecommendMinImageCount { get; set; }
+    public int RandomRecommendMaxImageCount { get; set; }
 
     public static AppSettings Current => current ??= Load();
 

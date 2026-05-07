@@ -10,7 +10,7 @@ public sealed class RandomRecommendForm : Form
     public int MinImageCount => (int)minImageCountBox.Value;
     public int? MaxImageCount => maxImageCountBox.Value <= 0 ? null : (int)maxImageCountBox.Value;
 
-    public RandomRecommendForm(int maxCount)
+    public RandomRecommendForm(int maxCount, int initialCount, int initialMinImageCount, int initialMaxImageCount)
     {
         Text = "랜덤 추천";
         AppIcons.ApplyTo(this);
@@ -46,7 +46,7 @@ public sealed class RandomRecommendForm : Form
 
         countBox.Minimum = 1;
         countBox.Maximum = Math.Max(1, maxCount);
-        countBox.Value = Math.Min(10, Math.Max(1, maxCount));
+        countBox.Value = Math.Clamp(initialCount <= 0 ? 10 : initialCount, 1, Math.Max(1, maxCount));
         countBox.Dock = DockStyle.Fill;
 
         var minImageCountLabel = new Label
@@ -57,7 +57,7 @@ public sealed class RandomRecommendForm : Form
         };
         minImageCountBox.Minimum = 0;
         minImageCountBox.Maximum = 1_000_000;
-        minImageCountBox.Value = 0;
+        minImageCountBox.Value = Math.Clamp(initialMinImageCount, 0, 1_000_000);
         minImageCountBox.Dock = DockStyle.Fill;
 
         var maxImageCountLabel = new Label
@@ -68,7 +68,7 @@ public sealed class RandomRecommendForm : Form
         };
         maxImageCountBox.Minimum = 0;
         maxImageCountBox.Maximum = 1_000_000;
-        maxImageCountBox.Value = 0;
+        maxImageCountBox.Value = Math.Clamp(initialMaxImageCount, 0, 1_000_000);
         maxImageCountBox.Dock = DockStyle.Fill;
 
         var hintLabel = new Label
