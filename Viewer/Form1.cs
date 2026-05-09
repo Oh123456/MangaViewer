@@ -6,6 +6,7 @@ public sealed class Form1 : Form
     private readonly FolderScanner scanner = new();
 
     private readonly Button scanButton = new();
+    private readonly Button incomingScanButton = new();
     private readonly Button fullScanButton = new();
     private readonly Button randomButton = new();
     private readonly ComboBox searchFieldComboBox = new();
@@ -89,6 +90,32 @@ public sealed class Form1 : Form
         FormClosing += (_, _) => SaveWindowPlacement();
     }
 
+    protected override bool ProcessCmdKey(ref Message message, Keys keyData)
+    {
+        if (keyData == (Keys.Control | Keys.S))
+        {
+            SaveSelectedFolder();
+            return true;
+        }
+
+        if (keyData == Keys.F5)
+        {
+            if (tabs.SelectedTab == randomTabPage)
+            {
+                ShowRandomFolders();
+            }
+            else
+            {
+                LoadFolders(selectedFolder?.Id, autoSelectFirst: false);
+                statusLabel.Text = Localization.T("새로고침됨");
+            }
+
+            return true;
+        }
+
+        return base.ProcessCmdKey(ref message, keyData);
+    }
+
     private void BuildUi()
     {
         Text = Localization.T("app.title");
@@ -126,10 +153,11 @@ public sealed class Form1 : Form
         var toolbar = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 12,
+            ColumnCount = 13,
             Padding = new Padding(8)
         };
-        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 105));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 94));
+        toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 74));
         toolbar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
@@ -146,6 +174,11 @@ public sealed class Form1 : Form
         scanButton.Dock = DockStyle.Fill;
         scanButton.Click += async (_, _) => await ScanAsync(ScanMode.QuickSync);
         toolTip.SetToolTip(scanButton, "기존 DB 폴더의 변경 시각을 먼저 확인해서 변경 없는 폴더는 빠르게 건너뜁니다.");
+
+        incomingScanButton.Text = Localization.T("toolbar.incomingScan");
+        incomingScanButton.Dock = DockStyle.Fill;
+        incomingScanButton.Click += async (_, _) => await ScanAsync(ScanMode.QuickSync, RootKind.Incoming);
+        toolTip.SetToolTip(incomingScanButton, "신규등록 루트만 스캔합니다. 전체 라이브러리 정리를 건너뛰어 첫 등록을 빠르게 처리합니다.");
 
         fullScanButton.Text = Localization.T("toolbar.fullScan");
         fullScanButton.Dock = DockStyle.Fill;
@@ -253,16 +286,17 @@ public sealed class Form1 : Form
         toolTip.SetToolTip(quickFilterComboBox, "정리가 필요한 항목만 빠르게 필터링합니다.");
 
         toolbar.Controls.Add(scanButton, 0, 0);
-        toolbar.Controls.Add(fullScanButton, 1, 0);
-        toolbar.Controls.Add(randomButton, 2, 0);
-        toolbar.Controls.Add(searchFieldComboBox, 3, 0);
-        toolbar.Controls.Add(searchBox, 4, 0);
-        toolbar.Controls.Add(tagFilterButton, 5, 0);
-        toolbar.Controls.Add(excludedTagFilterButton, 6, 0);
-        toolbar.Controls.Add(tagFilterModeComboBox, 7, 0);
-        toolbar.Controls.Add(clearTagFilterButton, 8, 0);
-        toolbar.Controls.Add(sortComboBox, 9, 0);
-        toolbar.Controls.Add(quickFilterComboBox, 10, 0);
+        toolbar.Controls.Add(incomingScanButton, 1, 0);
+        toolbar.Controls.Add(fullScanButton, 2, 0);
+        toolbar.Controls.Add(randomButton, 3, 0);
+        toolbar.Controls.Add(searchFieldComboBox, 4, 0);
+        toolbar.Controls.Add(searchBox, 5, 0);
+        toolbar.Controls.Add(tagFilterButton, 6, 0);
+        toolbar.Controls.Add(excludedTagFilterButton, 7, 0);
+        toolbar.Controls.Add(tagFilterModeComboBox, 8, 0);
+        toolbar.Controls.Add(clearTagFilterButton, 9, 0);
+        toolbar.Controls.Add(sortComboBox, 10, 0);
+        toolbar.Controls.Add(quickFilterComboBox, 11, 0);
 
         var contentLayout = new TableLayoutPanel
         {
@@ -843,12 +877,15 @@ public sealed class Form1 : Form
         }
     }
 
-    private async Task ScanAsync(ScanMode scanMode)
+    private async Task ScanAsync(ScanMode scanMode, RootKind? rootKind = null)
     {
-        var roots = database.GetRoots();
+        var roots = database.GetRoots(rootKind);
         if (roots.Count == 0)
         {
-            MessageBox.Show(this, "먼저 루트 폴더를 추가하세요.", "스캔", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var rootMessage = rootKind == RootKind.Incoming
+                ? "먼저 신규등록 루트 폴더를 추가하세요."
+                : "먼저 루트 폴더를 추가하세요.";
+            MessageBox.Show(this, rootMessage, "스캔", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -857,7 +894,9 @@ public sealed class Form1 : Form
         scanCancellationTokenSource = new CancellationTokenSource();
         var scanLog = new ScanLog();
         using var progressForm = new ScanProgressForm(CancelScan);
-        var modeText = scanMode == ScanMode.QuickSync ? "빠른 동기화" : "전체 스캔";
+        var modeText = rootKind == RootKind.Incoming
+            ? "신규등록 스캔"
+            : scanMode == ScanMode.QuickSync ? "빠른 동기화" : "전체 스캔";
         var progress = new Progress<ScanProgress>(scanProgress =>
         {
             var stageText = string.IsNullOrWhiteSpace(scanProgress.Stage) ? modeText : scanProgress.Stage;
@@ -872,7 +911,11 @@ public sealed class Form1 : Form
             progressForm.Show(this);
             progressForm.UpdateStatus("기존 DB 상태 확인 중...");
             var databaseStateStopwatch = System.Diagnostics.Stopwatch.StartNew();
-            var existingSignatureMap = await Task.Run(database.GetFolderScanSignatureMap, scanCancellationTokenSource.Token);
+            var existingSignatureMap = await Task.Run(() =>
+            {
+                scanCancellationTokenSource.Token.ThrowIfCancellationRequested();
+                return database.GetFolderScanSignatureMap(rootKind);
+            }, scanCancellationTokenSource.Token);
             scanLog.Add($"기존 DB 상태 확인 완료: {existingSignatureMap.Count}개 / {databaseStateStopwatch.Elapsed:mm\\:ss\\.fff}");
 
             progressForm.UpdateStatus($"{modeText} 중...");
@@ -903,12 +946,12 @@ public sealed class Form1 : Form
             var cleanupSummary = await Task.Run(() =>
             {
                 scanCancellationTokenSource.Token.ThrowIfCancellationRequested();
-                return database.RemoveMissingFoldersAndImages(checkImageFiles: false);
+                return database.RemoveMissingFoldersAndImages(checkImageFiles: false, rootKind: rootKind);
             }, scanCancellationTokenSource.Token);
             scanLog.Add($"누락 폴더 정리 완료: 삭제 폴더 {cleanupSummary.RemovedFolders}개 / 삭제 이미지 {cleanupSummary.RemovedImages}개 / {cleanupStopwatch.Elapsed:mm\\:ss\\.fff}");
             summary.RemovedFolders = cleanupSummary.RemovedFolders;
             summary.RemovedImages = cleanupSummary.RemovedImages;
-            if (AppSettings.Current.AutoRefreshPathStatusAfterScan)
+            if (AppSettings.Current.AutoRefreshPathStatusAfterScan && rootKind is null)
             {
                 progressForm.UpdateStatus("경로 확인 캐시 갱신 중...");
                 scanLog.Add("경로 확인 캐시 갱신 시작");
@@ -919,11 +962,20 @@ public sealed class Form1 : Form
                     scanCancellationTokenSource.Token);
                 scanLog.Add($"경로 확인 캐시 갱신 완료: 깨진 경로 {missingPathCount}개 / {pathRefreshStopwatch.Elapsed:mm\\:ss\\.fff}");
             }
+            else if (rootKind is not null)
+            {
+                scanLog.Add("루트 전용 스캔이므로 전체 경로 확인 캐시 갱신 생략");
+            }
 
             var summaryText = FormatScanSummaryText(modeText, summary, totalStopwatch.Elapsed);
             scanLog.Add(summaryText);
             LoadTagFilters();
             await Task.Yield();
+            if (rootKind == RootKind.Incoming && tabs.TabPages.Count > 5)
+            {
+                tabs.SelectedTab = tabs.TabPages[5];
+            }
+
             LoadFolders(autoSelectFirst: false);
             statusLabel.Text = summaryText;
         }
@@ -1010,7 +1062,7 @@ public sealed class Form1 : Form
             .Select((folder, order) => new { folder.Id, Order = order })
             .ToDictionary(item => item.Id, item => item.Order);
         var refreshedFolders = database
-            .GetFolders(FolderListMode.All, FolderSortMode.Name, FolderSearchField.Name, "", [], [], TagFilterMode.And)
+            .GetFoldersByIds(randomOrder.Keys.ToList())
             .Where(folder => randomOrder.ContainsKey(folder.Id))
             .OrderBy(folder => randomOrder[folder.Id])
             .ToList();
@@ -2035,6 +2087,7 @@ public sealed class Form1 : Form
     private void SetBusy(bool busy)
     {
         scanButton.Enabled = !busy;
+        incomingScanButton.Enabled = !busy;
         fullScanButton.Enabled = !busy;
         randomButton.Enabled = !busy;
         searchBox.Enabled = !busy;
@@ -2114,7 +2167,12 @@ public sealed class Form1 : Form
             return;
         }
 
-        var text = PromptText("태그 추가", "추가할 태그(쉼표로 구분)", "");
+        var existingTags = selectedFolders
+            .SelectMany(folder => folder.Tags)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var text = PromptTags("태그 추가", "추가할 태그(쉼표로 구분)", string.Join(", ", existingTags), allTagNames);
         if (string.IsNullOrWhiteSpace(text))
         {
             return;
@@ -2939,6 +2997,7 @@ public sealed class Form1 : Form
             }
 
             scanButton.Text = Localization.T("toolbar.quickSync");
+            incomingScanButton.Text = Localization.T("toolbar.incomingScan");
             fullScanButton.Text = Localization.T("toolbar.fullScan");
             randomButton.Text = Localization.T("toolbar.random");
             searchBox.PlaceholderText = Localization.T("toolbar.search");
@@ -3047,6 +3106,212 @@ public sealed class Form1 : Form
         dialog.CancelButton = cancelButton;
 
         return dialog.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+    }
+
+    private static string? PromptTags(string title, string label, string initialValue, IReadOnlyList<string> allTags)
+    {
+        using var dialog = new Form
+        {
+            Text = title,
+            Width = 460,
+            Height = 170,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterParent,
+            MinimizeBox = false,
+            MaximizeBox = false
+        };
+
+        var table = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 3,
+            ColumnCount = 1
+        };
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
+        table.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+
+        var labelControl = new Label
+        {
+            Text = label,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        };
+        var textBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = initialValue
+        };
+        var suggestionDropDown = new ToolStripDropDown { Padding = Padding.Empty, AutoClose = false };
+        var suggestionListBox = new ListBox
+        {
+            BorderStyle = BorderStyle.FixedSingle,
+            IntegralHeight = false
+        };
+        var host = new ToolStripControlHost(suggestionListBox)
+        {
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            AutoSize = false
+        };
+        suggestionDropDown.Items.Add(host);
+
+        void CloseSuggestions()
+        {
+            suggestionDropDown.Close();
+        }
+
+        string CurrentToken()
+        {
+            var selectionStart = Math.Clamp(textBox.SelectionStart, 0, textBox.Text.Length);
+            var commaIndex = selectionStart <= 0 ? -1 : textBox.Text.LastIndexOf(',', selectionStart - 1);
+            var tokenStart = commaIndex < 0 ? 0 : commaIndex + 1;
+            return textBox.Text[tokenStart..selectionStart].Trim();
+        }
+
+        void UpdateSuggestions()
+        {
+            if (!textBox.Focused || allTags.Count == 0)
+            {
+                CloseSuggestions();
+                return;
+            }
+
+            var token = CurrentToken();
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                CloseSuggestions();
+                return;
+            }
+
+            var existing = textBox.Text
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Where(tag => !tag.Equals(token, StringComparison.OrdinalIgnoreCase))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var matches = allTags
+                .Where(tag => tag.StartsWith(token, StringComparison.OrdinalIgnoreCase) && !existing.Contains(tag))
+                .Take(10)
+                .ToList();
+            if (matches.Count == 0)
+            {
+                CloseSuggestions();
+                return;
+            }
+
+            suggestionListBox.BeginUpdate();
+            suggestionListBox.Items.Clear();
+            suggestionListBox.Items.AddRange(matches.Cast<object>().ToArray());
+            suggestionListBox.SelectedIndex = 0;
+            suggestionListBox.EndUpdate();
+
+            var width = Math.Max(textBox.Width, 180);
+            var height = Math.Min(10, matches.Count) * Math.Max(suggestionListBox.ItemHeight, 18) + 6;
+            suggestionListBox.Size = new Size(width, height);
+            host.Size = suggestionListBox.Size;
+            if (!suggestionDropDown.Visible)
+            {
+                suggestionDropDown.Show(textBox, new Point(0, textBox.Height));
+            }
+        }
+
+        void ApplySuggestion()
+        {
+            if (suggestionListBox.SelectedItem is not string selectedTag)
+            {
+                return;
+            }
+
+            var selectionStart = Math.Clamp(textBox.SelectionStart, 0, textBox.Text.Length);
+            var tokenStart = selectionStart <= 0 ? -1 : textBox.Text.LastIndexOf(',', selectionStart - 1);
+            tokenStart = tokenStart < 0 ? 0 : tokenStart + 1;
+            while (tokenStart < textBox.Text.Length && char.IsWhiteSpace(textBox.Text[tokenStart]))
+            {
+                tokenStart++;
+            }
+
+            var tokenEnd = textBox.Text.IndexOf(',', selectionStart);
+            tokenEnd = tokenEnd < 0 ? textBox.Text.Length : tokenEnd;
+            var prefix = textBox.Text[..tokenStart];
+            var suffix = textBox.Text[tokenEnd..];
+            var separator = suffix.Length == 0 ? "" : " ";
+            textBox.Text = prefix + selectedTag + separator + suffix;
+            textBox.SelectionStart = (prefix + selectedTag).Length;
+            CloseSuggestions();
+            textBox.Focus();
+        }
+
+        textBox.TextChanged += (_, _) => UpdateSuggestions();
+        textBox.Leave += (_, _) => dialog.BeginInvoke(() =>
+        {
+            if (!suggestionListBox.Focused)
+            {
+                CloseSuggestions();
+            }
+        });
+        textBox.KeyDown += (_, keyEventArgs) =>
+        {
+            if (!suggestionDropDown.Visible)
+            {
+                return;
+            }
+
+            if (keyEventArgs.KeyCode == Keys.Down)
+            {
+                suggestionListBox.SelectedIndex = Math.Min(suggestionListBox.Items.Count - 1, suggestionListBox.SelectedIndex + 1);
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+            else if (keyEventArgs.KeyCode == Keys.Up)
+            {
+                suggestionListBox.SelectedIndex = Math.Max(0, suggestionListBox.SelectedIndex - 1);
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+            else if (keyEventArgs.KeyCode is Keys.Enter or Keys.Tab)
+            {
+                ApplySuggestion();
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+            else if (keyEventArgs.KeyCode == Keys.Escape)
+            {
+                CloseSuggestions();
+                keyEventArgs.Handled = true;
+                keyEventArgs.SuppressKeyPress = true;
+            }
+        };
+        suggestionListBox.MouseClick += (_, _) => ApplySuggestion();
+
+        var buttons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight
+        };
+        var okButton = new Button
+        {
+            Text = "확인",
+            DialogResult = DialogResult.OK,
+            Width = 80
+        };
+        var cancelButton = new Button
+        {
+            Text = "취소",
+            DialogResult = DialogResult.Cancel,
+            Width = 80
+        };
+
+        buttons.Controls.AddRange([okButton, cancelButton]);
+        table.Controls.Add(labelControl, 0, 0);
+        table.Controls.Add(textBox, 0, 1);
+        table.Controls.Add(buttons, 0, 2);
+        dialog.Controls.Add(table);
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+
+        var result = dialog.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
+        suggestionDropDown.Dispose();
+        return result;
     }
 
     private static string? PromptRoot(string title, string label, IReadOnlyList<string> roots)

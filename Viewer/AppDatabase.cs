@@ -172,11 +172,17 @@ public sealed class AppDatabase
         transaction.Commit();
     }
 
-    public Dictionary<string, FolderScanSignature> GetFolderScanSignatureMap()
+    public Dictionary<string, FolderScanSignature> GetFolderScanSignatureMap(RootKind? rootKind = null)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Path, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes FROM Folders WHERE FolderModifiedAt IS NOT NULL;";
+        var where = new List<string> { "FolderModifiedAt IS NOT NULL" };
+        ApplyRootKindFilter(where, rootKind);
+        command.CommandText = $"""
+            SELECT Path, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes
+            FROM Folders
+            WHERE {string.Join(" AND ", where)};
+            """;
         using var reader = command.ExecuteReader();
         var result = new Dictionary<string, FolderScanSignature>(StringComparer.OrdinalIgnoreCase);
         while (reader.Read())
@@ -200,6 +206,53 @@ public sealed class AppDatabase
     public List<FolderItem> GetFolders(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode = QuickFilterMode.All)
     {
         return GetFoldersPage(mode, sortMode, searchField, searchText, tagFilters, excludedTagFilters, tagFilterMode, quickFilterMode, 0, int.MaxValue).Items;
+    }
+
+    public List<FolderItem> GetFoldersByIds(IReadOnlyList<long> folderIds)
+    {
+        var idList = folderIds
+            .Distinct()
+            .ToList();
+        if (idList.Count == 0)
+        {
+            return [];
+        }
+
+        using var connection = OpenConnection();
+        var folders = new List<FolderItem>();
+        foreach (var chunk in idList.Chunk(800))
+        {
+            using var command = connection.CreateCommand();
+            var parameters = new List<string>();
+            for (var index = 0; index < chunk.Length; index++)
+            {
+                var parameterName = $"$folderId{index}";
+                parameters.Add(parameterName);
+                command.Parameters.AddWithValue(parameterName, chunk[index]);
+            }
+
+            command.CommandText = $"""
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                FROM Folders
+                WHERE Id IN ({string.Join(", ", parameters)});
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                folders.Add(ReadFolder(reader));
+            }
+        }
+
+        var tags = GetTagsForFolders(connection, folders.Select(folder => folder.Id).ToList());
+        foreach (var folder in folders)
+        {
+            if (tags.TryGetValue(folder.Id, out var folderTags))
+            {
+                folder.Tags = folderTags;
+            }
+        }
+
+        return folders;
     }
 
     public PagedFolderResult GetFoldersPage(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode, int offset, int limit, bool descending = false)
@@ -1452,7 +1505,7 @@ public sealed class AppDatabase
         }
     }
 
-    public CleanupSummary RemoveMissingFoldersAndImages(bool checkImageFiles = true)
+    public CleanupSummary RemoveMissingFoldersAndImages(bool checkImageFiles = true, RootKind? rootKind = null)
     {
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -1461,7 +1514,11 @@ public sealed class AppDatabase
         using (var command = connection.CreateCommand())
         {
             command.Transaction = transaction;
-            command.CommandText = "SELECT Id, Path FROM Folders;";
+            var where = new List<string>();
+            ApplyRootKindFilter(where, rootKind);
+            command.CommandText = where.Count == 0
+                ? "SELECT Id, Path FROM Folders;"
+                : $"SELECT Id, Path FROM Folders WHERE {string.Join(" AND ", where)};";
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -1483,10 +1540,13 @@ public sealed class AppDatabase
         {
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
-            command.CommandText = """
+            var where = new List<string>();
+            ApplyRootKindFilter(where, rootKind);
+            command.CommandText = $"""
                 SELECT Images.Id, Images.Path
                 FROM Images
-                JOIN Folders ON Folders.Id = Images.FolderId;
+                JOIN Folders ON Folders.Id = Images.FolderId
+                {(where.Count == 0 ? "" : $"WHERE {string.Join(" AND ", where)}")};
                 """;
             using var deleteImage = connection.CreateCommand();
             deleteImage.Transaction = transaction;
@@ -1515,7 +1575,9 @@ public sealed class AppDatabase
         using (var deleteEmptyFolders = connection.CreateCommand())
         {
             deleteEmptyFolders.Transaction = transaction;
-            deleteEmptyFolders.CommandText = "DELETE FROM Folders WHERE NOT EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id);";
+            var where = new List<string> { "NOT EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id)" };
+            ApplyRootKindFilter(where, rootKind);
+            deleteEmptyFolders.CommandText = $"DELETE FROM Folders WHERE {string.Join(" AND ", where)};";
             summary.RemovedFolders += deleteEmptyFolders.ExecuteNonQuery();
         }
 
@@ -1727,19 +1789,35 @@ public sealed class AppDatabase
 
     private static void ApplyRootModeFilter(List<string> where, FolderListMode mode)
     {
-        const string incomingRootCondition = """
+        var incomingRootCondition = BuildIncomingRootCondition("Folders.Path");
+
+        where.Add(mode == FolderListMode.NewRegistration ? incomingRootCondition : $"NOT {incomingRootCondition}");
+    }
+
+    private static void ApplyRootKindFilter(List<string> where, RootKind? rootKind)
+    {
+        if (rootKind is null)
+        {
+            return;
+        }
+
+        var incomingRootCondition = BuildIncomingRootCondition("Folders.Path");
+        where.Add(rootKind == RootKind.Incoming ? incomingRootCondition : $"NOT {incomingRootCondition}");
+    }
+
+    private static string BuildIncomingRootCondition(string pathExpression)
+    {
+        return $"""
             EXISTS (
                 SELECT 1
                 FROM Roots IncomingRoots
                 WHERE IncomingRoots.Kind = 'Incoming'
                   AND (
-                      Folders.Path = IncomingRoots.Path
-                      OR substr(Folders.Path, 1, length(IncomingRoots.Path || '\')) = IncomingRoots.Path || '\'
+                      {pathExpression} = IncomingRoots.Path
+                      OR substr({pathExpression}, 1, length(IncomingRoots.Path || '\')) = IncomingRoots.Path || '\'
                   )
             )
             """;
-
-        where.Add(mode == FolderListMode.NewRegistration ? incomingRootCondition : $"NOT {incomingRootCondition}");
     }
 
     private static void UpdatePathPrefix(SqliteConnection connection, SqliteTransaction transaction, string oldPath, string newPath)

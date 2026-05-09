@@ -20,6 +20,7 @@
   "tabs.series": "묶음 목록",
   "tabs.newRegistration": "신규등록",
   "toolbar.quickSync": "빠른 동기화",
+  "toolbar.incomingScan": "신규 스캔",
   "toolbar.fullScan": "전체 스캔",
   "toolbar.random": "랜덤",
   "toolbar.search": "검색어",

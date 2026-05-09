@@ -3,6 +3,8 @@
   "랜덤 추천": "Random Picks",
   "로컬 이미지 뷰어": "Local Image Viewer",
   "빠른 동기화": "Quick Sync",
+  "신규 스캔": "New Scan",
+  "신규등록 스캔": "New Registration Scan",
   "전체 스캔": "Full Scan",
   "랜덤": "Random",
   "검색어": "Search",
@@ -171,7 +173,10 @@
   "DB를 최적화하는 중...": "Optimizing DB...",
   "기존 DB 상태 확인 중...": "Checking existing DB state...",
   "누락 폴더 정리 중...": "Cleaning missing folders...",
-  "경로 확인 캐시 갱신 중...": "Refreshing path check cache..."
+  "경로 확인 캐시 갱신 중...": "Refreshing path check cache...",
+  "신규등록 루트만 스캔합니다. 전체 라이브러리 정리를 건너뛰어 첫 등록을 빠르게 처리합니다.": "Scans only new-registration roots. Skips full-library cleanup to make first registration faster.",
+  "먼저 신규등록 루트 폴더를 추가하세요.": "Add a new-registration root folder first.",
+  "신규등록 스캔 중...": "New Registration Scan..."
   ,
   "중복 폴더 확인 중...": "Checking duplicate folders...",
   "백업 파일을 만드는 중...": "Creating backup files...",
@@ -208,5 +213,6 @@
   "로딩 중...": "Loading...",
   "뷰어 로딩": "Viewer Loading",
   "비동기식": "Async",
-  "동기식": "Sync"
+  "동기식": "Sync",
+  "새로고침됨": "Refreshed"
 }

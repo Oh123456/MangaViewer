@@ -20,6 +20,7 @@
   "tabs.series": "Series",
   "tabs.newRegistration": "New",
   "toolbar.quickSync": "Quick Sync",
+  "toolbar.incomingScan": "New Scan",
   "toolbar.fullScan": "Full Scan",
   "toolbar.random": "Random",
   "toolbar.search": "Search",
