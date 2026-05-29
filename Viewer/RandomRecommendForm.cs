@@ -5,18 +5,21 @@ public sealed class RandomRecommendForm : Form
     private readonly NumericUpDown countBox = new();
     private readonly NumericUpDown minImageCountBox = new();
     private readonly NumericUpDown maxImageCountBox = new();
+    private readonly CheckBox cycleRandomCheckBox = new();
 
     public int RecommendCount => (int)countBox.Value;
     public int MinImageCount => (int)minImageCountBox.Value;
     public int? MaxImageCount => maxImageCountBox.Value <= 0 ? null : (int)maxImageCountBox.Value;
+    public bool CycleRandomEnabled => cycleRandomCheckBox.Checked;
+    public bool CycleResetRequested { get; private set; }
 
-    public RandomRecommendForm(int maxCount, int initialCount, int initialMinImageCount, int initialMaxImageCount)
+    public RandomRecommendForm(int maxCount, int initialCount, int initialMinImageCount, int initialMaxImageCount, bool initialCycleRandomEnabled)
     {
         Text = "랜덤 추천";
         AppIcons.ApplyTo(this);
         Width = 360;
-        Height = 230;
-        MinimumSize = new Size(340, 220);
+        Height = 264;
+        MinimumSize = new Size(340, 250);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;
         MinimizeBox = false;
@@ -26,9 +29,10 @@ public sealed class RandomRecommendForm : Form
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
-            RowCount = 5,
+            RowCount = 6,
             ColumnCount = 2
         };
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
@@ -71,6 +75,11 @@ public sealed class RandomRecommendForm : Form
         maxImageCountBox.Value = Math.Clamp(initialMaxImageCount, 0, 1_000_000);
         maxImageCountBox.Dock = DockStyle.Fill;
 
+        cycleRandomCheckBox.Text = "순회 랜덤";
+        cycleRandomCheckBox.Checked = initialCycleRandomEnabled;
+        cycleRandomCheckBox.Dock = DockStyle.Fill;
+        cycleRandomCheckBox.TextAlign = ContentAlignment.MiddleLeft;
+
         var hintLabel = new Label
         {
             Text = string.Format(Localization.T("현재 목록 후보: {0}개 / 최대 0은 제한 없음"), maxCount),
@@ -90,22 +99,33 @@ public sealed class RandomRecommendForm : Form
             DialogResult = DialogResult.OK,
             Width = 80
         };
+        var resetCycleButton = new Button
+        {
+            Text = "순회 초기화",
+            Width = 100
+        };
         var cancelButton = new Button
         {
             Text = "취소",
             DialogResult = DialogResult.Cancel,
             Width = 80
         };
+        resetCycleButton.Click += (_, _) =>
+        {
+            CycleResetRequested = true;
+            resetCycleButton.Text = Localization.T("초기화됨");
+        };
 
-        buttons.Controls.AddRange([okButton, cancelButton]);
+        buttons.Controls.AddRange([okButton, resetCycleButton, cancelButton]);
         root.Controls.Add(countLabel, 0, 0);
         root.Controls.Add(countBox, 1, 0);
         root.Controls.Add(minImageCountLabel, 0, 1);
         root.Controls.Add(minImageCountBox, 1, 1);
         root.Controls.Add(maxImageCountLabel, 0, 2);
         root.Controls.Add(maxImageCountBox, 1, 2);
-        root.Controls.Add(hintLabel, 1, 3);
-        root.Controls.Add(buttons, 0, 4);
+        root.Controls.Add(cycleRandomCheckBox, 1, 3);
+        root.Controls.Add(hintLabel, 1, 4);
+        root.Controls.Add(buttons, 0, 5);
         root.SetColumnSpan(buttons, 2);
         Controls.Add(root);
         Localization.ApplyTo(this);

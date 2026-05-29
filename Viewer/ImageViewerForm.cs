@@ -8,6 +8,7 @@ public sealed class ImageViewerForm : Form
     private static Rectangle lastWindowBounds = AppSettings.Current.ViewerWindow.Bounds;
     private static bool hasLastWindowBounds = AppSettings.Current.ViewerWindow.HasBounds;
 
+    private readonly AppDatabase database;
     private readonly List<ImageItem> images;
     private readonly PictureBox pictureBox = new();
     private readonly Label statusLabel = new();
@@ -17,6 +18,9 @@ public sealed class ImageViewerForm : Form
     private readonly Button previousFolderButton = new();
     private readonly Button nextFolderButton = new();
     private readonly Button lastFolderButton = new();
+    private readonly Button previousBookmarkButton = new();
+    private readonly Button bookmarkButton = new();
+    private readonly Button nextBookmarkButton = new();
     private readonly Button fullscreenButton = new();
     private readonly TextBox pageBox = new();
     private readonly Label pageTotalLabel = new();
@@ -36,8 +40,9 @@ public sealed class ImageViewerForm : Form
 
     public string? CurrentImagePath => images.Count == 0 ? null : images[index].Path;
 
-    public ImageViewerForm(List<ImageItem> imageItems, int startIndex = 0, bool enableFolderNavigation = false)
+    public ImageViewerForm(AppDatabase database, List<ImageItem> imageItems, int startIndex = 0, bool enableFolderNavigation = false)
     {
+        this.database = database;
         images = imageItems;
         this.enableFolderNavigation = enableFolderNavigation;
         folderOrder = imageItems
@@ -104,6 +109,21 @@ public sealed class ImageViewerForm : Form
         lastFolderButton.Visible = enableFolderNavigation;
         StyleToolbarButtonInstance(lastFolderButton);
 
+        previousBookmarkButton.Text = "이전 책갈피";
+        previousBookmarkButton.Width = 96;
+        previousBookmarkButton.Click += (_, _) => MoveBookmark(-1);
+        StyleToolbarButtonInstance(previousBookmarkButton);
+
+        bookmarkButton.Text = "책갈피";
+        bookmarkButton.Width = 78;
+        bookmarkButton.Click += (_, _) => ToggleBookmark();
+        StyleToolbarButtonInstance(bookmarkButton);
+
+        nextBookmarkButton.Text = "다음 책갈피";
+        nextBookmarkButton.Width = 96;
+        nextBookmarkButton.Click += (_, _) => MoveBookmark(1);
+        StyleToolbarButtonInstance(nextBookmarkButton);
+
         var pageTitleLabel = new Label
         {
             Text = "페이지",
@@ -167,7 +187,7 @@ public sealed class ImageViewerForm : Form
         statusLabel.ForeColor = Color.White;
         statusLabel.Padding = new Padding(14, 7, 0, 0);
 
-        toolbar.Controls.AddRange([previousButton, nextButton, firstFolderButton, previousFolderButton, nextFolderButton, lastFolderButton, pageTitleLabel, pageBox, pageLabel, pageTotalLabel, fullscreenButton, fitCheckBox, statusLabel]);
+        toolbar.Controls.AddRange([previousButton, nextButton, firstFolderButton, previousFolderButton, nextFolderButton, lastFolderButton, previousBookmarkButton, bookmarkButton, nextBookmarkButton, pageTitleLabel, pageBox, pageLabel, pageTotalLabel, fullscreenButton, fitCheckBox, statusLabel]);
 
         pictureBox.Dock = DockStyle.Fill;
         pictureBox.BackColor = Color.FromArgb(20, 20, 20);
@@ -203,7 +223,17 @@ public sealed class ImageViewerForm : Form
 
     private void OnKeyDown(object? sender, KeyEventArgs keyEventArgs)
     {
-        if (keyEventArgs.KeyCode == Keys.Left)
+        if (keyEventArgs.Control && keyEventArgs.KeyCode == Keys.Left)
+        {
+            MoveBookmark(-1);
+            keyEventArgs.Handled = true;
+        }
+        else if (keyEventArgs.Control && keyEventArgs.KeyCode == Keys.Right)
+        {
+            MoveBookmark(1);
+            keyEventArgs.Handled = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.Left)
         {
             MoveImage(-1);
             keyEventArgs.Handled = true;
@@ -221,6 +251,11 @@ public sealed class ImageViewerForm : Form
         else if (keyEventArgs.KeyCode == Keys.F11)
         {
             ToggleFullscreen();
+            keyEventArgs.Handled = true;
+        }
+        else if (keyEventArgs.KeyCode == Keys.B)
+        {
+            ToggleBookmark();
             keyEventArgs.Handled = true;
         }
         else if (keyEventArgs.KeyCode == Keys.Up && enableFolderNavigation)
@@ -263,6 +298,24 @@ public sealed class ImageViewerForm : Form
             }
 
             return base.ProcessCmdKey(ref message, keyData);
+        }
+
+        if (keyData == Keys.B)
+        {
+            ToggleBookmark();
+            return true;
+        }
+
+        if (keyData == (Keys.Control | Keys.Left))
+        {
+            MoveBookmark(-1);
+            return true;
+        }
+
+        if (keyData == (Keys.Control | Keys.Right))
+        {
+            MoveBookmark(1);
+            return true;
         }
 
         if (keyData is Keys.Left or Keys.PageUp or Keys.Back)
@@ -311,8 +364,77 @@ public sealed class ImageViewerForm : Form
             return;
         }
 
-        index = Math.Clamp(index + delta, 0, images.Count - 1);
+        var nextIndex = index + delta;
+        if (AppSettings.Current.ViewerLoopPages && images.Count > 1)
+        {
+            if (nextIndex < 0)
+            {
+                nextIndex = images.Count - 1;
+            }
+            else if (nextIndex >= images.Count)
+            {
+                nextIndex = 0;
+            }
+        }
+
+        index = Math.Clamp(nextIndex, 0, images.Count - 1);
         LoadCurrentImage();
+    }
+
+    private void ToggleBookmark()
+    {
+        if (images.Count == 0)
+        {
+            return;
+        }
+
+        var image = images[index];
+        image.IsBookmarked = !image.IsBookmarked;
+        database.SetImageBookmark(image.Id, image.IsBookmarked);
+        UpdateNavigationState();
+    }
+
+    private void MoveBookmark(int delta)
+    {
+        var targetIndex = FindBookmarkIndex(delta);
+        if (targetIndex < 0)
+        {
+            return;
+        }
+
+        index = targetIndex;
+        LoadCurrentImage();
+    }
+
+    private int FindBookmarkIndex(int delta)
+    {
+        if (images.Count == 0)
+        {
+            return -1;
+        }
+
+        if (delta < 0)
+        {
+            for (var imageIndex = index - 1; imageIndex >= 0; imageIndex--)
+            {
+                if (images[imageIndex].IsBookmarked)
+                {
+                    return imageIndex;
+                }
+            }
+
+            return -1;
+        }
+
+        for (var imageIndex = index + 1; imageIndex < images.Count; imageIndex++)
+        {
+            if (images[imageIndex].IsBookmarked)
+            {
+                return imageIndex;
+            }
+        }
+
+        return -1;
     }
 
     private void MoveFolder(int delta)
@@ -470,12 +592,18 @@ public sealed class ImageViewerForm : Form
 
     private void UpdateNavigationState()
     {
-        previousButton.Enabled = index > 0;
-        nextButton.Enabled = index < images.Count - 1;
+        var canLoopPages = AppSettings.Current.ViewerLoopPages && images.Count > 1;
+        previousButton.Enabled = canLoopPages || index > 0;
+        nextButton.Enabled = canLoopPages || index < images.Count - 1;
         firstFolderButton.Enabled = enableFolderNavigation && folderOrder.Count > 1 && images[index].FolderId != folderOrder.First();
         previousFolderButton.Enabled = enableFolderNavigation && HasAdjacentFolder(-1);
         nextFolderButton.Enabled = enableFolderNavigation && HasAdjacentFolder(1);
         lastFolderButton.Enabled = enableFolderNavigation && folderOrder.Count > 1 && images[index].FolderId != folderOrder.Last();
+        previousBookmarkButton.Enabled = FindBookmarkIndex(-1) >= 0;
+        nextBookmarkButton.Enabled = FindBookmarkIndex(1) >= 0;
+        bookmarkButton.Enabled = images.Count > 0;
+        bookmarkButton.Text = Localization.T(images[index].IsBookmarked ? "책갈피 해제" : "책갈피");
+        bookmarkButton.Width = images[index].IsBookmarked ? 96 : 78;
         UpdateToolbarButtonStyles();
         pageTotalLabel.Text = Math.Max(1, images.Count).ToString();
         pageBox.Text = (index + 1).ToString();

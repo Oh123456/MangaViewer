@@ -63,6 +63,7 @@ public sealed class Form1 : Form
 
     private List<FolderItem> folders = [];
     private List<FolderItem> randomFolders = [];
+    private readonly HashSet<long> cycleRandomUsedFolderIds = [];
     private readonly List<string> activeTagFilters = [];
     private readonly List<string> excludedTagFilters = [];
     private readonly List<string> allTagNames = [];
@@ -76,6 +77,7 @@ public sealed class Form1 : Form
     private int currentPageIndex;
     private int pageSize = 500;
     private int totalFolderCount;
+    private string? cycleRandomSignature;
     private CancellationTokenSource? scanCancellationTokenSource;
     private CancellationTokenSource? thumbnailLoadCancellationTokenSource;
 
@@ -1483,7 +1485,8 @@ public sealed class Form1 : Form
             candidateCount,
             AppSettings.Current.RandomRecommendCount,
             AppSettings.Current.RandomRecommendMinImageCount,
-            AppSettings.Current.RandomRecommendMaxImageCount);
+            AppSettings.Current.RandomRecommendMaxImageCount,
+            AppSettings.Current.RandomRecommendCycleEnabled);
         if (dialog.ShowDialog(this) != DialogResult.OK)
         {
             return;
@@ -1492,7 +1495,13 @@ public sealed class Form1 : Form
         AppSettings.Current.RandomRecommendCount = dialog.RecommendCount;
         AppSettings.Current.RandomRecommendMinImageCount = dialog.MinImageCount;
         AppSettings.Current.RandomRecommendMaxImageCount = dialog.MaxImageCount ?? 0;
+        AppSettings.Current.RandomRecommendCycleEnabled = dialog.CycleRandomEnabled;
         AppSettings.Save();
+        if (dialog.CycleResetRequested)
+        {
+            cycleRandomSignature = null;
+            cycleRandomUsedFolderIds.Clear();
+        }
 
         var allCandidates = database.GetFolders(
             GetCurrentFolderListMode(),
@@ -1518,11 +1527,52 @@ public sealed class Form1 : Form
             return;
         }
 
-        var targetCount = Math.Min(dialog.RecommendCount, filteredCandidates.Count);
-        var recommendedFolders = filteredCandidates
+        var candidatePool = filteredCandidates;
+        var cycleText = "";
+        if (dialog.CycleRandomEnabled)
+        {
+            var nextSignature = BuildCycleRandomSignature(filteredCandidates);
+            if (!string.Equals(cycleRandomSignature, nextSignature, StringComparison.Ordinal))
+            {
+                cycleRandomSignature = nextSignature;
+                cycleRandomUsedFolderIds.Clear();
+            }
+
+            candidatePool = filteredCandidates
+                .Where(folder => !cycleRandomUsedFolderIds.Contains(folder.Id))
+                .ToList();
+            if (candidatePool.Count == 0)
+            {
+                cycleRandomUsedFolderIds.Clear();
+                candidatePool = filteredCandidates;
+            }
+        }
+
+        var targetCount = Math.Min(dialog.RecommendCount, candidatePool.Count);
+        var recommendedFolders = candidatePool
             .OrderBy(_ => Random.Shared.Next())
             .Take(targetCount)
             .ToList();
+
+        if (dialog.CycleRandomEnabled)
+        {
+            var resetAfterThisPick = candidatePool.Count <= dialog.RecommendCount;
+            if (resetAfterThisPick)
+            {
+                cycleRandomUsedFolderIds.Clear();
+                cycleText = $" / {Localization.T("순회 초기화")}";
+            }
+            else
+            {
+                foreach (var recommendedFolder in recommendedFolders)
+                {
+                    cycleRandomUsedFolderIds.Add(recommendedFolder.Id);
+                }
+
+                var remainingCount = filteredCandidates.Count - cycleRandomUsedFolderIds.Count;
+                cycleText = $" / {string.Format(Localization.T("순회 남음 {0}개"), remainingCount.ToString("N0"))}";
+            }
+        }
 
         folders = recommendedFolders;
         randomFolders = folders;
@@ -1540,7 +1590,18 @@ public sealed class Form1 : Form
         selectedFolder = null;
         PopulateFolderList(null, autoSelectFirst: true);
         var maxImageText = dialog.MaxImageCount is null ? "제한 없음" : dialog.MaxImageCount.Value.ToString("N0");
-        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {filteredCandidates.Count:N0}개 / 이미지 {dialog.MinImageCount:N0}-{maxImageText}";
+        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {filteredCandidates.Count:N0}개 / 이미지 {dialog.MinImageCount:N0}-{maxImageText}{cycleText}";
+    }
+
+    private static string BuildCycleRandomSignature(IReadOnlyList<FolderItem> candidates)
+    {
+        var hashCode = new HashCode();
+        foreach (var folderId in candidates.Select(folder => folder.Id).Order())
+        {
+            hashCode.Add(folderId);
+        }
+
+        return $"{candidates.Count}:{hashCode.ToHashCode()}";
     }
 
     private static List<FolderItem> BuildRandomCandidates(
@@ -1830,7 +1891,7 @@ public sealed class Form1 : Form
         }
 
         database.MarkFolderViewed(images[0].FolderId, images[0].Path);
-        using var viewer = new ImageViewerForm(images, 0, isSeriesViewer);
+        using var viewer = new ImageViewerForm(database, images, 0, isSeriesViewer);
         viewer.ShowDialog(this);
         database.UpdateLastImagePath(selectedFolder.Id, viewer.CurrentImagePath);
         RefreshFolderFromDatabase(selectedFolder.Id);

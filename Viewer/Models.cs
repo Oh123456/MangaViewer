@@ -44,6 +44,7 @@ public sealed class ImageItem
     public long FileSize { get; set; }
     public DateTime ModifiedAt { get; set; }
     public int SortOrder { get; set; }
+    public bool IsBookmarked { get; set; }
     public string? FolderDisplayName { get; set; }
     public string? FolderPath { get; set; }
     public DateTime? FolderModifiedAt { get; set; }

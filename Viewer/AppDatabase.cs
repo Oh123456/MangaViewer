@@ -62,6 +62,7 @@ public sealed class AppDatabase
                 FileSize INTEGER NOT NULL,
                 ModifiedAt TEXT NOT NULL,
                 SortOrder INTEGER NOT NULL,
+                IsBookmarked INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY (FolderId) REFERENCES Folders(Id) ON DELETE CASCADE
             );
 
@@ -90,6 +91,7 @@ public sealed class AppDatabase
         EnsureColumn(connection, "Folders", "TotalImageBytes", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "PathExists", "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(connection, "Folders", "PathCheckedAt", "TEXT NULL");
+        EnsureColumn(connection, "Images", "IsBookmarked", "INTEGER NOT NULL DEFAULT 0");
         EnsureIndexes(connection);
         BackfillFolderModifiedAt(connection);
         BackfillFolderScanStats(connection);
@@ -956,7 +958,7 @@ public sealed class AppDatabase
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Id, FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder
+            SELECT Id, FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder, IsBookmarked
             FROM Images
             WHERE FolderId = $folderId
             ORDER BY SortOrder ASC, FileName COLLATE NOCASE ASC;
@@ -975,7 +977,8 @@ public sealed class AppDatabase
                 FileName = reader.GetString(3),
                 FileSize = reader.GetInt64(4),
                 ModifiedAt = FromDb(reader.GetString(5)) ?? DateTime.MinValue,
-                SortOrder = reader.GetInt32(6)
+                SortOrder = reader.GetInt32(6),
+                IsBookmarked = reader.GetInt32(7) == 1
             });
         }
 
@@ -990,7 +993,7 @@ public sealed class AppDatabase
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Images.Id, Images.FolderId, Images.Path, Images.FileName, Images.FileSize, Images.ModifiedAt, Images.SortOrder, Folders.DisplayName, Folders.SeriesOrder
+            SELECT Images.Id, Images.FolderId, Images.Path, Images.FileName, Images.FileSize, Images.ModifiedAt, Images.SortOrder, Images.IsBookmarked, Folders.DisplayName, Folders.SeriesOrder
             FROM Images
             JOIN Folders ON Folders.Id = Images.FolderId
             WHERE Folders.SeriesName = $seriesName
@@ -1015,8 +1018,9 @@ public sealed class AppDatabase
                 FileSize = reader.GetInt64(4),
                 ModifiedAt = FromDb(reader.GetString(5)) ?? DateTime.MinValue,
                 SortOrder = reader.GetInt32(6),
-                FolderDisplayName = reader.IsDBNull(7) ? null : reader.GetString(7),
-                FolderSeriesOrder = reader.IsDBNull(8) ? null : reader.GetInt32(8)
+                IsBookmarked = reader.GetInt32(7) == 1,
+                FolderDisplayName = reader.IsDBNull(8) ? null : reader.GetString(8),
+                FolderSeriesOrder = reader.IsDBNull(9) ? null : reader.GetInt32(9)
             });
         }
 
@@ -1027,6 +1031,20 @@ public sealed class AppDatabase
             .ThenBy(image => image.FileName, NaturalStringComparer.OrdinalIgnoreCase)
             .ThenBy(image => image.SortOrder)
             .ToList();
+    }
+
+    public void SetImageBookmark(long imageId, bool isBookmarked)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE Images
+            SET IsBookmarked = $isBookmarked
+            WHERE Id = $imageId;
+            """;
+        command.Parameters.AddWithValue("$imageId", imageId);
+        command.Parameters.AddWithValue("$isBookmarked", isBookmarked ? 1 : 0);
+        command.ExecuteNonQuery();
     }
 
     public FolderItem? GetFirstFolderInSeries(string seriesName)
@@ -1417,6 +1435,19 @@ public sealed class AppDatabase
             update.ExecuteNonQuery();
         }
 
+        var existingBookmarks = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        using (var bookmarkCommand = connection.CreateCommand())
+        {
+            bookmarkCommand.Transaction = transaction;
+            bookmarkCommand.CommandText = "SELECT Path, IsBookmarked FROM Images WHERE FolderId = $folderId AND IsBookmarked = 1;";
+            bookmarkCommand.Parameters.AddWithValue("$folderId", folderId.Value);
+            using var reader = bookmarkCommand.ExecuteReader();
+            while (reader.Read())
+            {
+                existingBookmarks[reader.GetString(0)] = reader.GetInt32(1) == 1;
+            }
+        }
+
         using (var deleteImages = connection.CreateCommand())
         {
             deleteImages.Transaction = transaction;
@@ -1431,14 +1462,15 @@ public sealed class AppDatabase
             using var insertImage = connection.CreateCommand();
             insertImage.Transaction = transaction;
             insertImage.CommandText = """
-                INSERT INTO Images (FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder)
-                VALUES ($folderId, $path, $fileName, $fileSize, $modifiedAt, $sortOrder)
+                INSERT INTO Images (FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder, IsBookmarked)
+                VALUES ($folderId, $path, $fileName, $fileSize, $modifiedAt, $sortOrder, $isBookmarked)
                 ON CONFLICT(Path) DO UPDATE SET
                     FolderId = excluded.FolderId,
                     FileName = excluded.FileName,
                     FileSize = excluded.FileSize,
                     ModifiedAt = excluded.ModifiedAt,
-                    SortOrder = excluded.SortOrder;
+                    SortOrder = excluded.SortOrder,
+                    IsBookmarked = excluded.IsBookmarked;
                 """;
             insertImage.Parameters.AddWithValue("$folderId", folderId.Value);
             insertImage.Parameters.AddWithValue("$path", image.FullName);
@@ -1446,6 +1478,7 @@ public sealed class AppDatabase
             insertImage.Parameters.AddWithValue("$fileSize", image.Length);
             insertImage.Parameters.AddWithValue("$modifiedAt", ToDb(image.LastWriteTime));
             insertImage.Parameters.AddWithValue("$sortOrder", i);
+            insertImage.Parameters.AddWithValue("$isBookmarked", existingBookmarks.GetValueOrDefault(image.FullName) ? 1 : 0);
             insertImage.ExecuteNonQuery();
         }
 
@@ -1990,6 +2023,7 @@ public sealed class AppDatabase
             CREATE INDEX IF NOT EXISTS idx_images_folderid ON Images(FolderId);
             CREATE INDEX IF NOT EXISTS idx_images_path ON Images(Path);
             CREATE INDEX IF NOT EXISTS idx_images_filename_size ON Images(FileName COLLATE NOCASE, FileSize);
+            CREATE INDEX IF NOT EXISTS idx_images_bookmarked ON Images(IsBookmarked);
             CREATE INDEX IF NOT EXISTS idx_foldertags_tagid ON FolderTags(TagId);
             """;
         command.ExecuteNonQuery();

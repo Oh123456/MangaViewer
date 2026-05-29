@@ -14,6 +14,7 @@ public sealed class AppSettings
     public bool ViewerFitToWindow { get; set; } = true;
     public bool ViewerFullscreen { get; set; }
     public bool ViewerAsyncImageLoading { get; set; } = true;
+    public bool ViewerLoopPages { get; set; }
     public bool AutoRefreshPathStatusAfterScan { get; set; }
     public int PartialDuplicateThresholdPercent { get; set; } = 80;
     public string LanguageCode { get; set; } = "kr";
@@ -22,6 +23,7 @@ public sealed class AppSettings
     public int RandomRecommendCount { get; set; } = 10;
     public int RandomRecommendMinImageCount { get; set; }
     public int RandomRecommendMaxImageCount { get; set; }
+    public bool RandomRecommendCycleEnabled { get; set; }
 
     public static AppSettings Current => current ??= Load();
 
