@@ -13,6 +13,8 @@
   "common.view": "View",
   "settings.title": "Settings",
   "settings.language": "Language",
+  "tabs.imageMode": "Images",
+  "tabs.videoMode": "Videos",
   "tabs.all": "All",
   "tabs.favorites": "Favorites",
   "tabs.recent": "Recently Viewed",

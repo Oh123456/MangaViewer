@@ -13,6 +13,8 @@
   "common.view": "보기",
   "settings.title": "설정",
   "settings.language": "언어",
+  "tabs.imageMode": "이미지",
+  "tabs.videoMode": "영상",
   "tabs.all": "전체 목록",
   "tabs.favorites": "즐겨찾기",
   "tabs.recent": "최근 본 것",

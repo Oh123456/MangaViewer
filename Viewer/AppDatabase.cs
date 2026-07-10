@@ -23,9 +23,11 @@ public sealed class AppDatabase
 
             CREATE TABLE IF NOT EXISTS Roots (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
-                Path TEXT NOT NULL UNIQUE,
+                Path TEXT NOT NULL,
                 Kind TEXT NOT NULL DEFAULT 'Main',
-                CreatedAt TEXT NOT NULL
+                MediaKind TEXT NOT NULL DEFAULT 'Image',
+                CreatedAt TEXT NOT NULL,
+                UNIQUE(Path, Kind, MediaKind)
             );
 
             CREATE TABLE IF NOT EXISTS Folders (
@@ -47,6 +49,8 @@ public sealed class AppDatabase
                 FolderModifiedAt TEXT NULL,
                 ImageCount INTEGER NOT NULL DEFAULT 0,
                 TotalImageBytes INTEGER NOT NULL DEFAULT 0,
+                VideoCount INTEGER NOT NULL DEFAULT 0,
+                TotalVideoBytes INTEGER NOT NULL DEFAULT 0,
                 ThumbnailPath TEXT NULL,
                 PathExists INTEGER NOT NULL DEFAULT 1,
                 PathCheckedAt TEXT NULL,
@@ -66,6 +70,17 @@ public sealed class AppDatabase
                 FOREIGN KEY (FolderId) REFERENCES Folders(Id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS Videos (
+                Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                FolderId INTEGER NOT NULL,
+                Path TEXT NOT NULL UNIQUE,
+                FileName TEXT NOT NULL,
+                FileSize INTEGER NOT NULL,
+                ModifiedAt TEXT NOT NULL,
+                SortOrder INTEGER NOT NULL,
+                FOREIGN KEY (FolderId) REFERENCES Folders(Id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS Tags (
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 Name TEXT NOT NULL UNIQUE
@@ -80,7 +95,9 @@ public sealed class AppDatabase
             );
             """;
         command.ExecuteNonQuery();
+        MigrateRootsSchema(connection);
         EnsureColumn(connection, "Roots", "Kind", "TEXT NOT NULL DEFAULT 'Main'");
+        EnsureColumn(connection, "Roots", "MediaKind", "TEXT NOT NULL DEFAULT 'Image'");
         EnsureColumn(connection, "Folders", "LastImagePath", "TEXT NULL");
         EnsureColumn(connection, "Folders", "IsReserved", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "SeriesName", "TEXT NULL");
@@ -89,6 +106,8 @@ public sealed class AppDatabase
         EnsureColumn(connection, "Folders", "FolderModifiedAt", "TEXT NULL");
         EnsureColumn(connection, "Folders", "ImageCount", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "TotalImageBytes", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "Folders", "VideoCount", "INTEGER NOT NULL DEFAULT 0");
+        EnsureColumn(connection, "Folders", "TotalVideoBytes", "INTEGER NOT NULL DEFAULT 0");
         EnsureColumn(connection, "Folders", "PathExists", "INTEGER NOT NULL DEFAULT 1");
         EnsureColumn(connection, "Folders", "PathCheckedAt", "TEXT NULL");
         EnsureColumn(connection, "Images", "IsBookmarked", "INTEGER NOT NULL DEFAULT 0");
@@ -97,17 +116,28 @@ public sealed class AppDatabase
         BackfillFolderScanStats(connection);
     }
 
-    public List<string> GetRoots(RootKind? kind = null)
+    public List<string> GetRoots(RootKind? kind = null, MediaKind? mediaKind = null)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
-        command.CommandText = kind is null
-            ? "SELECT Path FROM Roots ORDER BY Kind, Path;"
-            : "SELECT Path FROM Roots WHERE Kind = $kind ORDER BY Path;";
+        var where = new List<string>();
         if (kind is not null)
         {
+            where.Add("Kind = $kind");
             command.Parameters.AddWithValue("$kind", ToRootKind(kind.Value));
         }
+        if (mediaKind is not null)
+        {
+            where.Add("MediaKind = $mediaKind");
+            command.Parameters.AddWithValue("$mediaKind", ToMediaKind(mediaKind.Value));
+        }
+
+        command.CommandText = $"""
+            SELECT Path
+            FROM Roots
+            {(where.Count == 0 ? "" : "WHERE " + string.Join(" AND ", where))}
+            ORDER BY MediaKind, Kind, Path;
+            """;
 
         using var reader = command.ExecuteReader();
         var roots = new List<string>();
@@ -119,16 +149,19 @@ public sealed class AppDatabase
         return roots;
     }
 
-    public void AddRoot(string path, RootKind kind = RootKind.Main)
+    public void AddRoot(string path, RootKind kind = RootKind.Main, MediaKind mediaKind = MediaKind.Image)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT OR IGNORE INTO Roots (Path, Kind, CreatedAt)
-            VALUES ($path, $kind, $createdAt);
+            INSERT INTO Roots (Path, Kind, MediaKind, CreatedAt)
+            VALUES ($path, $kind, $mediaKind, $createdAt)
+            ON CONFLICT(Path, Kind, MediaKind) DO UPDATE SET
+                CreatedAt = CreatedAt;
             """;
         command.Parameters.AddWithValue("$path", path);
         command.Parameters.AddWithValue("$kind", ToRootKind(kind));
+        command.Parameters.AddWithValue("$mediaKind", ToMediaKind(mediaKind));
         command.Parameters.AddWithValue("$createdAt", ToDb(DateTime.Now));
         command.ExecuteNonQuery();
     }
@@ -143,6 +176,24 @@ public sealed class AppDatabase
             command.Transaction = transaction;
             command.CommandText = "DELETE FROM Roots WHERE Path = $path;";
             command.Parameters.AddWithValue("$path", path);
+            command.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+    }
+
+    public void DeleteRoots(IEnumerable<(string Path, RootKind Kind, MediaKind MediaKind)> roots)
+    {
+        using var connection = OpenConnection();
+        using var transaction = connection.BeginTransaction();
+        foreach (var root in roots)
+        {
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM Roots WHERE Path = $path AND Kind = $kind AND MediaKind = $mediaKind;";
+            command.Parameters.AddWithValue("$path", root.Path);
+            command.Parameters.AddWithValue("$kind", ToRootKind(root.Kind));
+            command.Parameters.AddWithValue("$mediaKind", ToMediaKind(root.MediaKind));
             command.ExecuteNonQuery();
         }
 
@@ -174,14 +225,14 @@ public sealed class AppDatabase
         transaction.Commit();
     }
 
-    public Dictionary<string, FolderScanSignature> GetFolderScanSignatureMap(RootKind? rootKind = null)
+    public Dictionary<string, FolderScanSignature> GetFolderScanSignatureMap(RootKind? rootKind = null, MediaKind? mediaKind = null)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         var where = new List<string> { "FolderModifiedAt IS NOT NULL" };
-        ApplyRootKindFilter(where, rootKind);
+        ApplyRootKindFilter(where, rootKind, mediaKind);
         command.CommandText = $"""
-            SELECT Path, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes
+            SELECT Path, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes, VideoCount, TotalVideoBytes
             FROM Folders
             WHERE {string.Join(" AND ", where)};
             """;
@@ -197,7 +248,9 @@ public sealed class AppDatabase
                     DirectoryModifiedAt = reader.IsDBNull(1) ? null : FromDb(reader.GetString(1)),
                     FolderModifiedAt = modifiedAt.Value,
                     ImageCount = reader.GetInt32(3),
-                    TotalImageBytes = reader.GetInt64(4)
+                    TotalImageBytes = reader.GetInt64(4),
+                    VideoCount = reader.GetInt32(5),
+                    TotalVideoBytes = reader.GetInt64(6)
                 };
             }
         }
@@ -205,9 +258,9 @@ public sealed class AppDatabase
         return result;
     }
 
-    public List<FolderItem> GetFolders(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode = QuickFilterMode.All)
+    public List<FolderItem> GetFolders(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode = QuickFilterMode.All, bool videoMode = false)
     {
-        return GetFoldersPage(mode, sortMode, searchField, searchText, tagFilters, excludedTagFilters, tagFilterMode, quickFilterMode, 0, int.MaxValue).Items;
+        return GetFoldersPage(mode, sortMode, searchField, searchText, tagFilters, excludedTagFilters, tagFilterMode, quickFilterMode, 0, int.MaxValue, videoMode: videoMode).Items;
     }
 
     public List<FolderItem> GetFoldersByIds(IReadOnlyList<long> folderIds)
@@ -234,7 +287,7 @@ public sealed class AppDatabase
             }
 
             command.CommandText = $"""
-                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
                 FROM Folders
                 WHERE Id IN ({string.Join(", ", parameters)});
                 """;
@@ -257,7 +310,7 @@ public sealed class AppDatabase
         return folders;
     }
 
-    public PagedFolderResult GetFoldersPage(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode, int offset, int limit, bool descending = false)
+    public PagedFolderResult GetFoldersPage(FolderListMode mode, FolderSortMode sortMode, FolderSearchField searchField, string searchText, IReadOnlyList<string> tagFilters, IReadOnlyList<string> excludedTagFilters, TagFilterMode tagFilterMode, QuickFilterMode quickFilterMode, int offset, int limit, bool descending = false, bool videoMode = false)
     {
         using var connection = OpenConnection();
         var folders = new List<FolderItem>();
@@ -278,23 +331,11 @@ public sealed class AppDatabase
             }
             else if (mode == FolderListMode.Series)
             {
-                where.Add("""
-                    SeriesName IS NOT NULL
-                    AND TRIM(SeriesName) <> ''
-                    AND Id = (
-                        SELECT FirstSeriesFolder.Id
-                        FROM Folders FirstSeriesFolder
-                        WHERE FirstSeriesFolder.SeriesName = Folders.SeriesName
-                        ORDER BY FirstSeriesFolder.SeriesOrder IS NULL,
-                                 FirstSeriesFolder.SeriesOrder ASC,
-                                 FirstSeriesFolder.DisplayName COLLATE NOCASE ASC,
-                                 FirstSeriesFolder.Id ASC
-                        LIMIT 1
-                    )
-                    """);
+                where.Add(BuildSeriesRepresentativeCondition(videoMode));
             }
 
-            ApplyRootModeFilter(where, mode);
+            ApplyRootModeFilter(where, mode, videoMode);
+            ApplyMediaModeFilter(where, videoMode);
 
             if (quickFilterMode == QuickFilterMode.Unviewed)
             {
@@ -364,6 +405,7 @@ public sealed class AppDatabase
                 command.Parameters.AddWithValue(parameterName, excludedTagFilters[tagIndex]);
             }
 
+            var mediaCountColumn = videoMode ? "VideoCount" : "ImageCount";
             var orderBy = sortMode switch
             {
                 FolderSortMode.Date when descending => "FolderModifiedAt ASC NULLS LAST, DisplayName COLLATE NOCASE ASC",
@@ -376,14 +418,14 @@ public sealed class AppDatabase
                 FolderSortMode.Score => "Score DESC, DisplayName COLLATE NOCASE ASC",
                 FolderSortMode.Series when descending => "SeriesName COLLATE NOCASE DESC NULLS LAST, SeriesOrder IS NULL, SeriesOrder DESC, DisplayName COLLATE NOCASE DESC",
                 FolderSortMode.Series => "SeriesName COLLATE NOCASE ASC NULLS LAST, SeriesOrder IS NULL, SeriesOrder ASC, DisplayName COLLATE NOCASE ASC",
-                FolderSortMode.ImageCount when descending => "ImageCount ASC, DisplayName COLLATE NOCASE ASC",
-                FolderSortMode.ImageCount => "ImageCount DESC, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.ImageCount when descending => $"{mediaCountColumn} ASC, DisplayName COLLATE NOCASE ASC",
+                FolderSortMode.ImageCount => $"{mediaCountColumn} DESC, DisplayName COLLATE NOCASE ASC",
                 _ when descending => "LastViewedAt ASC NULLS LAST, UpdatedAt ASC",
                 _ => "LastViewedAt DESC NULLS LAST, UpdatedAt DESC"
             };
 
             command.CommandText = $"""
-                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
                 FROM Folders
                 {(where.Count == 0 ? "" : "WHERE " + string.Join(" AND ", where))}
                 ORDER BY {orderBy}
@@ -417,23 +459,11 @@ public sealed class AppDatabase
             }
             else if (mode == FolderListMode.Series)
             {
-                where.Add("""
-                    SeriesName IS NOT NULL
-                    AND TRIM(SeriesName) <> ''
-                    AND Id = (
-                        SELECT FirstSeriesFolder.Id
-                        FROM Folders FirstSeriesFolder
-                        WHERE FirstSeriesFolder.SeriesName = Folders.SeriesName
-                        ORDER BY FirstSeriesFolder.SeriesOrder IS NULL,
-                                 FirstSeriesFolder.SeriesOrder ASC,
-                                 FirstSeriesFolder.DisplayName COLLATE NOCASE ASC,
-                                 FirstSeriesFolder.Id ASC
-                        LIMIT 1
-                    )
-                    """);
+                where.Add(BuildSeriesRepresentativeCondition(videoMode));
             }
 
-            ApplyRootModeFilter(where, mode);
+            ApplyRootModeFilter(where, mode, videoMode);
+            ApplyMediaModeFilter(where, videoMode);
 
             if (quickFilterMode == QuickFilterMode.Unviewed)
             {
@@ -569,7 +599,7 @@ public sealed class AppDatabase
         using (var command = connection.CreateCommand())
         {
             command.CommandText = """
-                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
                 FROM Folders
                 WHERE SeriesName = $seriesName
                 ORDER BY SeriesOrder IS NULL,
@@ -656,7 +686,7 @@ public sealed class AppDatabase
         return result;
     }
 
-    public Dictionary<string, FolderItem> GetFirstFoldersInSeries(IEnumerable<string> seriesNames)
+    public Dictionary<string, FolderItem> GetFirstFoldersInSeries(IEnumerable<string> seriesNames, bool videoMode = false)
     {
         var names = seriesNames
             .Where(name => !string.IsNullOrWhiteSpace(name))
@@ -683,10 +713,12 @@ public sealed class AppDatabase
                     command.Parameters.AddWithValue(parameterName, chunk[index]);
                 }
 
+                var mediaCondition = videoMode ? "VideoCount > 0" : "ImageCount > 0";
                 command.CommandText = $"""
-                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
                     FROM Folders
                     WHERE SeriesName IN ({string.Join(", ", parameters)})
+                      AND {mediaCondition}
                     ORDER BY SeriesName COLLATE NOCASE ASC,
                              SeriesOrder IS NULL,
                              SeriesOrder ASC,
@@ -747,7 +779,7 @@ public sealed class AppDatabase
             using (var command = connection.CreateCommand())
             {
                 command.CommandText = """
-                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+                    SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
                     FROM Folders
                     WHERE DisplayName = $displayName COLLATE NOCASE
                     ORDER BY FolderModifiedAt DESC NULLS LAST, Path COLLATE NOCASE ASC;
@@ -1047,12 +1079,90 @@ public sealed class AppDatabase
         command.ExecuteNonQuery();
     }
 
+    public List<VideoItem> GetVideos(long folderId)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT Id, FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder
+            FROM Videos
+            WHERE FolderId = $folderId
+            ORDER BY SortOrder ASC, FileName COLLATE NOCASE ASC;
+            """;
+        command.Parameters.AddWithValue("$folderId", folderId);
+
+        using var reader = command.ExecuteReader();
+        var videos = new List<VideoItem>();
+        while (reader.Read())
+        {
+            videos.Add(new VideoItem
+            {
+                Id = reader.GetInt64(0),
+                FolderId = reader.GetInt64(1),
+                Path = reader.GetString(2),
+                FileName = reader.GetString(3),
+                FileSize = reader.GetInt64(4),
+                ModifiedAt = FromDb(reader.GetString(5)) ?? DateTime.MinValue,
+                SortOrder = reader.GetInt32(6)
+            });
+        }
+
+        return videos
+            .OrderBy(video => video.FileName, NaturalStringComparer.OrdinalIgnoreCase)
+            .ThenBy(video => video.SortOrder)
+            .ToList();
+    }
+
+    public List<VideoItem> GetSeriesVideos(string seriesName)
+    {
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT Videos.Id, Videos.FolderId, Videos.Path, Videos.FileName, Videos.FileSize, Videos.ModifiedAt, Videos.SortOrder, Folders.DisplayName, Folders.SeriesOrder
+            FROM Videos
+            JOIN Folders ON Folders.Id = Videos.FolderId
+            WHERE Folders.SeriesName = $seriesName
+            ORDER BY Folders.SeriesOrder IS NULL,
+                     Folders.SeriesOrder ASC,
+                     Folders.DisplayName COLLATE NOCASE ASC,
+                     Videos.SortOrder ASC,
+                     Videos.FileName COLLATE NOCASE ASC;
+            """;
+        command.Parameters.AddWithValue("$seriesName", seriesName);
+
+        using var reader = command.ExecuteReader();
+        var videos = new List<VideoItem>();
+        while (reader.Read())
+        {
+            videos.Add(new VideoItem
+            {
+                Id = reader.GetInt64(0),
+                FolderId = reader.GetInt64(1),
+                Path = reader.GetString(2),
+                FileName = reader.GetString(3),
+                FileSize = reader.GetInt64(4),
+                ModifiedAt = FromDb(reader.GetString(5)) ?? DateTime.MinValue,
+                SortOrder = reader.GetInt32(6),
+                FolderDisplayName = reader.IsDBNull(7) ? null : reader.GetString(7),
+                FolderSeriesOrder = reader.IsDBNull(8) ? null : reader.GetInt32(8)
+            });
+        }
+
+        return videos
+            .OrderBy(video => video.FolderSeriesOrder is null)
+            .ThenBy(video => video.FolderSeriesOrder)
+            .ThenBy(video => video.FolderDisplayName ?? "", NaturalStringComparer.OrdinalIgnoreCase)
+            .ThenBy(video => video.SortOrder)
+            .ThenBy(video => video.FileName, NaturalStringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     public FolderItem? GetFirstFolderInSeries(string seriesName)
     {
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
             FROM Folders
             WHERE SeriesName = $seriesName
             ORDER BY SeriesOrder IS NULL,
@@ -1088,7 +1198,7 @@ public sealed class AppDatabase
         using var connection = OpenConnection();
         using var command = connection.CreateCommand();
         command.CommandText = """
-            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt
+            SELECT Id, Path, DisplayName, Author, Number, SeriesName, SeriesOrder, Score, Memo, IsFavorite, IsReserved, ViewCount, LastViewedAt, LastImagePath, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt, VideoCount, TotalVideoBytes
             FROM Folders
             WHERE Id = $folderId
             LIMIT 1;
@@ -1383,15 +1493,20 @@ public sealed class AppDatabase
     {
         var now = DateTime.Now;
         var folderModifiedAt = result.FolderModifiedAt;
+        var thumbnailPath = result.Images.Count > 0
+            ? result.Images[0].FullName
+            : result.Videos.FirstOrDefault()?.FullName;
         var folderId = GetFolderId(connection, transaction, result.FolderPath);
         if (folderId is null)
         {
-            var parsed = FolderNameParser.Parse(new DirectoryInfo(result.FolderPath).Name);
+            var parsed = result.VideoCount > 0 && result.ImageCount == 0
+                ? (DisplayName: Path.GetFileNameWithoutExtension(result.FolderPath), Author: (string?)null, Number: (string?)null)
+                : FolderNameParser.Parse(new DirectoryInfo(result.FolderPath).Name);
             using var insert = connection.CreateCommand();
             insert.Transaction = transaction;
             insert.CommandText = """
-                INSERT INTO Folders (Path, DisplayName, Author, Number, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt)
-                VALUES ($path, $displayName, $author, $number, $directoryModifiedAt, $folderModifiedAt, $imageCount, $totalImageBytes, $thumbnailPath, 1, $pathCheckedAt, $createdAt, $updatedAt);
+                INSERT INTO Folders (Path, DisplayName, Author, Number, DirectoryModifiedAt, FolderModifiedAt, ImageCount, TotalImageBytes, VideoCount, TotalVideoBytes, ThumbnailPath, PathExists, PathCheckedAt, CreatedAt, UpdatedAt)
+                VALUES ($path, $displayName, $author, $number, $directoryModifiedAt, $folderModifiedAt, $imageCount, $totalImageBytes, $videoCount, $totalVideoBytes, $thumbnailPath, 1, $pathCheckedAt, $createdAt, $updatedAt);
                 SELECT last_insert_rowid();
                 """;
             insert.Parameters.AddWithValue("$path", result.FolderPath);
@@ -1402,7 +1517,9 @@ public sealed class AppDatabase
             insert.Parameters.AddWithValue("$folderModifiedAt", ToDb(folderModifiedAt));
             insert.Parameters.AddWithValue("$imageCount", result.ImageCount);
             insert.Parameters.AddWithValue("$totalImageBytes", result.TotalImageBytes);
-            insert.Parameters.AddWithValue("$thumbnailPath", result.Images[0].FullName);
+            insert.Parameters.AddWithValue("$videoCount", result.VideoCount);
+            insert.Parameters.AddWithValue("$totalVideoBytes", result.TotalVideoBytes);
+            insert.Parameters.AddWithValue("$thumbnailPath", DbValue(thumbnailPath));
             insert.Parameters.AddWithValue("$pathCheckedAt", ToDb(now));
             insert.Parameters.AddWithValue("$createdAt", ToDb(now));
             insert.Parameters.AddWithValue("$updatedAt", ToDb(now));
@@ -1419,16 +1536,20 @@ public sealed class AppDatabase
                     FolderModifiedAt = $folderModifiedAt,
                     ImageCount = $imageCount,
                     TotalImageBytes = $totalImageBytes,
+                    VideoCount = $videoCount,
+                    TotalVideoBytes = $totalVideoBytes,
                     PathExists = 1,
                     PathCheckedAt = $pathCheckedAt,
                     UpdatedAt = $updatedAt
                 WHERE Id = $id;
                 """;
-            update.Parameters.AddWithValue("$thumbnailPath", result.Images[0].FullName);
+            update.Parameters.AddWithValue("$thumbnailPath", DbValue(thumbnailPath));
             update.Parameters.AddWithValue("$directoryModifiedAt", ToDb(result.DirectoryModifiedAt));
             update.Parameters.AddWithValue("$folderModifiedAt", ToDb(folderModifiedAt));
             update.Parameters.AddWithValue("$imageCount", result.ImageCount);
             update.Parameters.AddWithValue("$totalImageBytes", result.TotalImageBytes);
+            update.Parameters.AddWithValue("$videoCount", result.VideoCount);
+            update.Parameters.AddWithValue("$totalVideoBytes", result.TotalVideoBytes);
             update.Parameters.AddWithValue("$pathCheckedAt", ToDb(now));
             update.Parameters.AddWithValue("$updatedAt", ToDb(now));
             update.Parameters.AddWithValue("$id", folderId.Value);
@@ -1456,6 +1577,14 @@ public sealed class AppDatabase
             deleteImages.ExecuteNonQuery();
         }
 
+        using (var deleteVideos = connection.CreateCommand())
+        {
+            deleteVideos.Transaction = transaction;
+            deleteVideos.CommandText = "DELETE FROM Videos WHERE FolderId = $folderId;";
+            deleteVideos.Parameters.AddWithValue("$folderId", folderId.Value);
+            deleteVideos.ExecuteNonQuery();
+        }
+
         for (var i = 0; i < result.Images.Count; i++)
         {
             var image = result.Images[i];
@@ -1480,6 +1609,30 @@ public sealed class AppDatabase
             insertImage.Parameters.AddWithValue("$sortOrder", i);
             insertImage.Parameters.AddWithValue("$isBookmarked", existingBookmarks.GetValueOrDefault(image.FullName) ? 1 : 0);
             insertImage.ExecuteNonQuery();
+        }
+
+        for (var videoIndex = 0; videoIndex < result.Videos.Count; videoIndex++)
+        {
+            var video = result.Videos[videoIndex];
+            using var insertVideo = connection.CreateCommand();
+            insertVideo.Transaction = transaction;
+            insertVideo.CommandText = """
+                INSERT INTO Videos (FolderId, Path, FileName, FileSize, ModifiedAt, SortOrder)
+                VALUES ($folderId, $path, $fileName, $fileSize, $modifiedAt, $sortOrder)
+                ON CONFLICT(Path) DO UPDATE SET
+                    FolderId = excluded.FolderId,
+                    FileName = excluded.FileName,
+                    FileSize = excluded.FileSize,
+                    ModifiedAt = excluded.ModifiedAt,
+                    SortOrder = excluded.SortOrder;
+                """;
+            insertVideo.Parameters.AddWithValue("$folderId", folderId.Value);
+            insertVideo.Parameters.AddWithValue("$path", video.FullName);
+            insertVideo.Parameters.AddWithValue("$fileName", video.Name);
+            insertVideo.Parameters.AddWithValue("$fileSize", video.Length);
+            insertVideo.Parameters.AddWithValue("$modifiedAt", ToDb(video.LastWriteTime));
+            insertVideo.Parameters.AddWithValue("$sortOrder", videoIndex);
+            insertVideo.ExecuteNonQuery();
         }
 
     }
@@ -1538,7 +1691,7 @@ public sealed class AppDatabase
         }
     }
 
-    public CleanupSummary RemoveMissingFoldersAndImages(bool checkImageFiles = true, RootKind? rootKind = null)
+    public CleanupSummary RemoveMissingFoldersAndImages(bool checkImageFiles = true, RootKind? rootKind = null, MediaKind? mediaKind = null)
     {
         using var connection = OpenConnection();
         using var transaction = connection.BeginTransaction();
@@ -1548,7 +1701,7 @@ public sealed class AppDatabase
         {
             command.Transaction = transaction;
             var where = new List<string>();
-            ApplyRootKindFilter(where, rootKind);
+            ApplyRootKindFilter(where, rootKind, mediaKind);
             command.CommandText = where.Count == 0
                 ? "SELECT Id, Path FROM Folders;"
                 : $"SELECT Id, Path FROM Folders WHERE {string.Join(" AND ", where)};";
@@ -1561,7 +1714,7 @@ public sealed class AppDatabase
 
         foreach (var folder in folders)
         {
-            if (!Directory.Exists(folder.Path))
+            if (!EntryPathExists(folder.Path))
             {
                 DeleteFolder(connection, transaction, folder.Id);
                 summary.RemovedFolders++;
@@ -1574,7 +1727,7 @@ public sealed class AppDatabase
             using var command = connection.CreateCommand();
             command.Transaction = transaction;
             var where = new List<string>();
-            ApplyRootKindFilter(where, rootKind);
+            ApplyRootKindFilter(where, rootKind, mediaKind);
             command.CommandText = $"""
                 SELECT Images.Id, Images.Path
                 FROM Images
@@ -1603,13 +1756,49 @@ public sealed class AppDatabase
                 deleteImage.ExecuteNonQuery();
                 summary.RemovedImages++;
             }
+
+            using var videoCommand = connection.CreateCommand();
+            videoCommand.Transaction = transaction;
+            var videoWhere = new List<string>();
+            ApplyRootKindFilter(videoWhere, rootKind, mediaKind);
+            videoCommand.CommandText = $"""
+                SELECT Videos.Id, Videos.Path
+                FROM Videos
+                JOIN Folders ON Folders.Id = Videos.FolderId
+                {(videoWhere.Count == 0 ? "" : $"WHERE {string.Join(" AND ", videoWhere)}")};
+                """;
+            using var deleteVideo = connection.CreateCommand();
+            deleteVideo.Transaction = transaction;
+            deleteVideo.CommandText = "DELETE FROM Videos WHERE Id = $id;";
+            var videoIdParameter = deleteVideo.Parameters.Add("$id", SqliteType.Integer);
+            var missingVideos = new List<long>();
+            using (var reader = videoCommand.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    if (!File.Exists(reader.GetString(1)))
+                    {
+                        missingVideos.Add(reader.GetInt64(0));
+                    }
+                }
+            }
+
+            foreach (var videoId in missingVideos)
+            {
+                videoIdParameter.Value = videoId;
+                deleteVideo.ExecuteNonQuery();
+            }
         }
 
         using (var deleteEmptyFolders = connection.CreateCommand())
         {
             deleteEmptyFolders.Transaction = transaction;
-            var where = new List<string> { "NOT EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id)" };
-            ApplyRootKindFilter(where, rootKind);
+            var where = new List<string>
+            {
+                "NOT EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id)",
+                "NOT EXISTS (SELECT 1 FROM Videos WHERE Videos.FolderId = Folders.Id)"
+            };
+            ApplyRootKindFilter(where, rootKind, mediaKind);
             deleteEmptyFolders.CommandText = $"DELETE FROM Folders WHERE {string.Join(" AND ", where)};";
             summary.RemovedFolders += deleteEmptyFolders.ExecuteNonQuery();
         }
@@ -1650,7 +1839,7 @@ public sealed class AppDatabase
         {
             cancellationToken.ThrowIfCancellationRequested();
             var folder = folders[index];
-            var exists = Directory.Exists(folder.Path);
+            var exists = EntryPathExists(folder.Path);
             if (!exists)
             {
                 missingCount++;
@@ -1671,6 +1860,49 @@ public sealed class AppDatabase
         return missingCount;
     }
 
+    public int RemoveLegacyAggregateVideoFolders(RootKind? rootKind = null, MediaKind? mediaKind = null)
+    {
+        using var connection = OpenConnection();
+        var folders = new List<(long Id, string Path)>();
+        using (var command = connection.CreateCommand())
+        {
+            var where = new List<string>
+            {
+                "ImageCount = 0",
+                "VideoCount > 0"
+            };
+            ApplyRootKindFilter(where, rootKind, mediaKind);
+            command.CommandText = $"""
+                SELECT Id, Path
+                FROM Folders
+                WHERE {string.Join(" AND ", where)};
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                folders.Add((reader.GetInt64(0), reader.GetString(1)));
+            }
+        }
+
+        var legacyFolderIds = folders
+            .Where(folder => Directory.Exists(folder.Path))
+            .Select(folder => folder.Id)
+            .ToList();
+        if (legacyFolderIds.Count == 0)
+        {
+            return 0;
+        }
+
+        using var transaction = connection.BeginTransaction();
+        foreach (var folderId in legacyFolderIds)
+        {
+            DeleteFolder(connection, transaction, folderId);
+        }
+
+        transaction.Commit();
+        return legacyFolderIds.Count;
+    }
+
     private static void DeleteFolder(SqliteConnection connection, SqliteTransaction transaction, long folderId)
     {
         using var deleteFolder = connection.CreateCommand();
@@ -1678,6 +1910,11 @@ public sealed class AppDatabase
         deleteFolder.CommandText = "DELETE FROM Folders WHERE Id = $id;";
         deleteFolder.Parameters.AddWithValue("$id", folderId);
         deleteFolder.ExecuteNonQuery();
+    }
+
+    private static bool EntryPathExists(string path)
+    {
+        return Directory.Exists(path) || File.Exists(path);
     }
 
     public int ClearBrokenThumbnails()
@@ -1820,34 +2057,131 @@ public sealed class AppDatabase
         return connection;
     }
 
-    private static void ApplyRootModeFilter(List<string> where, FolderListMode mode)
+    private static void MigrateRootsSchema(SqliteConnection connection)
     {
-        var incomingRootCondition = BuildIncomingRootCondition("Folders.Path");
+        using var infoCommand = connection.CreateCommand();
+        infoCommand.CommandText = "PRAGMA table_info(Roots);";
+        var hasMediaKind = false;
+        using (var reader = infoCommand.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                if (string.Equals(reader.GetString(1), "MediaKind", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasMediaKind = true;
+                    break;
+                }
+            }
+        }
 
-        where.Add(mode == FolderListMode.NewRegistration ? incomingRootCondition : $"NOT {incomingRootCondition}");
-    }
-
-    private static void ApplyRootKindFilter(List<string> where, RootKind? rootKind)
-    {
-        if (rootKind is null)
+        if (hasMediaKind)
         {
             return;
         }
 
-        var incomingRootCondition = BuildIncomingRootCondition("Folders.Path");
-        where.Add(rootKind == RootKind.Incoming ? incomingRootCondition : $"NOT {incomingRootCondition}");
+        using var transaction = connection.BeginTransaction();
+        using (var create = connection.CreateCommand())
+        {
+            create.Transaction = transaction;
+            create.CommandText = """
+                CREATE TABLE Roots_New (
+                    Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    Path TEXT NOT NULL,
+                    Kind TEXT NOT NULL DEFAULT 'Main',
+                    MediaKind TEXT NOT NULL DEFAULT 'Image',
+                    CreatedAt TEXT NOT NULL,
+                    UNIQUE(Path, Kind, MediaKind)
+                );
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        using (var copy = connection.CreateCommand())
+        {
+            copy.Transaction = transaction;
+            copy.CommandText = """
+                INSERT OR IGNORE INTO Roots_New (Path, Kind, MediaKind, CreatedAt)
+                SELECT Path, Kind, 'Image', CreatedAt
+                FROM Roots;
+                """;
+            copy.ExecuteNonQuery();
+        }
+
+        using (var drop = connection.CreateCommand())
+        {
+            drop.Transaction = transaction;
+            drop.CommandText = "DROP TABLE Roots;";
+            drop.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.Transaction = transaction;
+            rename.CommandText = "ALTER TABLE Roots_New RENAME TO Roots;";
+            rename.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
     }
 
-    private static string BuildIncomingRootCondition(string pathExpression)
+    private static void ApplyRootModeFilter(List<string> where, FolderListMode mode, bool videoMode)
     {
+        var mediaKind = videoMode ? MediaKind.Video : MediaKind.Image;
+        var rootKind = mode == FolderListMode.NewRegistration ? RootKind.Incoming : RootKind.Main;
+        var rootCondition = BuildRootCondition("Folders.Path", rootKind, mediaKind);
+
+        where.Add(rootCondition);
+    }
+
+    private static void ApplyMediaModeFilter(List<string> where, bool videoMode)
+    {
+        where.Add(videoMode ? "VideoCount > 0" : "ImageCount > 0");
+    }
+
+    private static string BuildSeriesRepresentativeCondition(bool videoMode)
+    {
+        var mediaCondition = videoMode ? "FirstSeriesFolder.VideoCount > 0" : "FirstSeriesFolder.ImageCount > 0";
+        return $"""
+            SeriesName IS NOT NULL
+            AND TRIM(SeriesName) <> ''
+            AND Id = (
+                SELECT FirstSeriesFolder.Id
+                FROM Folders FirstSeriesFolder
+                WHERE FirstSeriesFolder.SeriesName = Folders.SeriesName
+                  AND {mediaCondition}
+                ORDER BY FirstSeriesFolder.SeriesOrder IS NULL,
+                         FirstSeriesFolder.SeriesOrder ASC,
+                         FirstSeriesFolder.DisplayName COLLATE NOCASE ASC,
+                         FirstSeriesFolder.Id ASC
+                LIMIT 1
+            )
+            """;
+    }
+
+    private static void ApplyRootKindFilter(List<string> where, RootKind? rootKind, MediaKind? mediaKind = null)
+    {
+        if (rootKind is null && mediaKind is null)
+        {
+            return;
+        }
+
+        where.Add(BuildRootCondition("Folders.Path", rootKind, mediaKind));
+    }
+
+    private static string BuildRootCondition(string pathExpression, RootKind? rootKind, MediaKind? mediaKind)
+    {
+        var kindCondition = rootKind is null ? "" : $"AND MatchingRoots.Kind = '{ToRootKind(rootKind.Value)}'";
+        var mediaCondition = mediaKind is null ? "" : $"AND MatchingRoots.MediaKind = '{ToMediaKind(mediaKind.Value)}'";
         return $"""
             EXISTS (
                 SELECT 1
-                FROM Roots IncomingRoots
-                WHERE IncomingRoots.Kind = 'Incoming'
+                FROM Roots MatchingRoots
+                WHERE 1 = 1
+                  {kindCondition}
+                  {mediaCondition}
                   AND (
-                      {pathExpression} = IncomingRoots.Path
-                      OR substr({pathExpression}, 1, length(IncomingRoots.Path || '\')) = IncomingRoots.Path || '\'
+                      {pathExpression} = MatchingRoots.Path
+                      OR substr({pathExpression}, 1, length(MatchingRoots.Path || '\')) = MatchingRoots.Path || '\'
                   )
             )
             """;
@@ -1897,6 +2231,20 @@ public sealed class AppDatabase
             """;
         AddPathPrefixParameters(images, oldPath, newPath, oldPrefix, newPrefix);
         images.ExecuteNonQuery();
+
+        using var videos = connection.CreateCommand();
+        videos.Transaction = transaction;
+        videos.CommandText = """
+            UPDATE Videos
+            SET Path = CASE
+                    WHEN Path = $oldPath THEN $newPath
+                    ELSE $newPrefix || substr(Path, length($oldPrefix) + 1)
+                END
+            WHERE Path = $oldPath
+               OR substr(Path, 1, length($oldPrefix)) = $oldPrefix;
+            """;
+        AddPathPrefixParameters(videos, oldPath, newPath, oldPrefix, newPrefix);
+        videos.ExecuteNonQuery();
     }
 
     private static void AddPathPrefixParameters(SqliteCommand command, string oldPath, string newPath, string oldPrefix, string newPrefix)
@@ -1921,9 +2269,14 @@ public sealed class AppDatabase
         return kind == RootKind.Incoming ? "Incoming" : "Main";
     }
 
+    private static string ToMediaKind(MediaKind kind)
+    {
+        return kind == MediaKind.Video ? "Video" : "Image";
+    }
+
     private static FolderItem ReadFolder(SqliteDataReader reader)
     {
-        return new FolderItem
+        var folder = new FolderItem
         {
             Id = reader.GetInt64(0),
             Path = reader.GetString(1),
@@ -1948,6 +2301,14 @@ public sealed class AppDatabase
             CreatedAt = FromDb(reader.GetString(20)) ?? DateTime.MinValue,
             UpdatedAt = FromDb(reader.GetString(21)) ?? DateTime.MinValue
         };
+
+        if (reader.FieldCount > 22)
+        {
+            folder.VideoCount = reader.GetInt32(22);
+            folder.TotalVideoBytes = reader.GetInt64(23);
+        }
+
+        return folder;
     }
 
     private static void BackfillFolderModifiedAt(SqliteConnection connection)
@@ -1955,13 +2316,15 @@ public sealed class AppDatabase
         using var command = connection.CreateCommand();
         command.CommandText = """
             UPDATE Folders
-            SET FolderModifiedAt = (
-                SELECT MAX(ModifiedAt)
-                FROM Images
-                WHERE Images.FolderId = Folders.Id
+            SET FolderModifiedAt = MAX(
+                COALESCE((SELECT MAX(ModifiedAt) FROM Images WHERE Images.FolderId = Folders.Id), '0001-01-01 00:00:00'),
+                COALESCE((SELECT MAX(ModifiedAt) FROM Videos WHERE Videos.FolderId = Folders.Id), '0001-01-01 00:00:00')
             )
             WHERE FolderModifiedAt IS NULL
-              AND EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id);
+              AND (
+                  EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id)
+                  OR EXISTS (SELECT 1 FROM Videos WHERE Videos.FolderId = Folders.Id)
+              );
             """;
         command.ExecuteNonQuery();
     }
@@ -1980,9 +2343,22 @@ public sealed class AppDatabase
                     SELECT COALESCE(SUM(FileSize), 0)
                     FROM Images
                     WHERE Images.FolderId = Folders.Id
+                ),
+                VideoCount = (
+                    SELECT COUNT(*)
+                    FROM Videos
+                    WHERE Videos.FolderId = Folders.Id
+                ),
+                TotalVideoBytes = (
+                    SELECT COALESCE(SUM(FileSize), 0)
+                    FROM Videos
+                    WHERE Videos.FolderId = Folders.Id
                 )
             WHERE ImageCount = 0
-              AND EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id);
+              AND (
+                  EXISTS (SELECT 1 FROM Images WHERE Images.FolderId = Folders.Id)
+                  OR EXISTS (SELECT 1 FROM Videos WHERE Videos.FolderId = Folders.Id)
+              );
             """;
         command.ExecuteNonQuery();
     }
@@ -2011,6 +2387,7 @@ public sealed class AppDatabase
     {
         using var command = connection.CreateCommand();
         command.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_roots_path_kind_media ON Roots(Path, Kind, MediaKind);
             CREATE INDEX IF NOT EXISTS idx_folders_path ON Folders(Path);
             CREATE INDEX IF NOT EXISTS idx_folders_directorymodifiedat ON Folders(DirectoryModifiedAt);
             CREATE INDEX IF NOT EXISTS idx_folders_foldermodifiedat ON Folders(FolderModifiedAt);
@@ -2024,6 +2401,9 @@ public sealed class AppDatabase
             CREATE INDEX IF NOT EXISTS idx_images_path ON Images(Path);
             CREATE INDEX IF NOT EXISTS idx_images_filename_size ON Images(FileName COLLATE NOCASE, FileSize);
             CREATE INDEX IF NOT EXISTS idx_images_bookmarked ON Images(IsBookmarked);
+            CREATE INDEX IF NOT EXISTS idx_videos_folderid ON Videos(FolderId);
+            CREATE INDEX IF NOT EXISTS idx_videos_path ON Videos(Path);
+            CREATE INDEX IF NOT EXISTS idx_videos_filename_size ON Videos(FileName COLLATE NOCASE, FileSize);
             CREATE INDEX IF NOT EXISTS idx_foldertags_tagid ON FolderTags(TagId);
             """;
         command.ExecuteNonQuery();

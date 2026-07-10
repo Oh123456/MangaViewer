@@ -19,6 +19,8 @@ public sealed class FolderItem
     public DateTime? FolderModifiedAt { get; set; }
     public int ImageCount { get; set; }
     public long TotalImageBytes { get; set; }
+    public int VideoCount { get; set; }
+    public long TotalVideoBytes { get; set; }
     public string? ThumbnailPath { get; set; }
     public bool PathExists { get; set; } = true;
     public DateTime? PathCheckedAt { get; set; }
@@ -53,6 +55,19 @@ public sealed class ImageItem
     public int? FolderSeriesOrder { get; set; }
 }
 
+public sealed class VideoItem
+{
+    public long Id { get; set; }
+    public long FolderId { get; set; }
+    public string Path { get; set; } = "";
+    public string FileName { get; set; } = "";
+    public long FileSize { get; set; }
+    public DateTime ModifiedAt { get; set; }
+    public int SortOrder { get; set; }
+    public string? FolderDisplayName { get; set; }
+    public int? FolderSeriesOrder { get; set; }
+}
+
 public sealed class DuplicateImageCandidate
 {
     public int GroupNumber { get; set; }
@@ -82,13 +97,18 @@ public sealed class FolderScanResult
 {
     public required string FolderPath { get; init; }
     public required List<FileInfo> Images { get; init; }
+    public required List<FileInfo> Videos { get; init; }
     public DateTime DirectoryModifiedAt { get; init; }
 
-    public DateTime FolderModifiedAt => Images.Count == 0 ? DateTime.MinValue : Images.Max(image => image.LastWriteTime);
+    public DateTime FolderModifiedAt => Images.Concat(Videos).Select(file => file.LastWriteTime).DefaultIfEmpty(DateTime.MinValue).Max();
 
     public int ImageCount => Images.Count;
 
     public long TotalImageBytes => Images.Sum(image => image.Length);
+
+    public int VideoCount => Videos.Count;
+
+    public long TotalVideoBytes => Videos.Sum(video => video.Length);
 }
 
 public sealed class ScanProgress
@@ -117,6 +137,8 @@ public sealed class FolderScanSignature
     public DateTime FolderModifiedAt { get; init; }
     public int ImageCount { get; init; }
     public long TotalImageBytes { get; init; }
+    public int VideoCount { get; init; }
+    public long TotalVideoBytes { get; init; }
 }
 
 public enum ScanMode
@@ -171,6 +193,12 @@ public enum RootKind
 {
     Main,
     Incoming
+}
+
+public enum MediaKind
+{
+    Image,
+    Video
 }
 
 public enum FolderSortMode

@@ -12,6 +12,17 @@ public sealed class FolderScanner
         ".webp"
     };
 
+    private static readonly HashSet<string> VideoExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mp4",
+        ".mkv",
+        ".avi",
+        ".mov",
+        ".wmv",
+        ".webm",
+        ".m4v"
+    };
+
     public Task<List<FolderScanResult>> ScanAsync(IEnumerable<string> roots, IProgress<ScanProgress>? progress, ScanLog scanLog, CancellationToken cancellationToken)
     {
         return Task.Run(() =>
@@ -29,21 +40,31 @@ public sealed class FolderScanner
                     cancellationToken.ThrowIfCancellationRequested();
                     foldersVisited++;
                     var images = GetImages(directory);
-                    if (images.Count > 0)
+                    var videos = GetVideos(directory);
+                    if (images.Count > 0 || videos.Count > 0)
                     {
                         var directoryModifiedAt = GetDirectoryModifiedAt(directory);
                         if (loggedImageFolderCount < 100)
                         {
-                            scanLog.Add($"이미지 폴더 발견: {directory} ({images.Count}개)");
+                            scanLog.Add($"미디어 폴더 발견: {directory} (이미지 {images.Count}개 / 영상 {videos.Count}개)");
                             loggedImageFolderCount++;
                         }
 
-                        results.Add(new FolderScanResult
+                        if (images.Count > 0)
                         {
-                            FolderPath = directory,
-                            DirectoryModifiedAt = directoryModifiedAt,
-                            Images = images
-                        });
+                            results.Add(new FolderScanResult
+                            {
+                                FolderPath = directory,
+                                DirectoryModifiedAt = directoryModifiedAt,
+                                Images = images,
+                                Videos = []
+                            });
+                        }
+
+                        foreach (var video in videos)
+                        {
+                            results.Add(CreateVideoScanResult(video));
+                        }
                     }
 
                     var now = DateTime.Now;
@@ -68,7 +89,7 @@ public sealed class FolderScanner
                 ImageFoldersFound = results.Count,
                 CurrentPath = null
             });
-            scanLog.Add($"스캔 완료: 방문 폴더 {foldersVisited}개, 이미지 폴더 {results.Count}개");
+            scanLog.Add($"스캔 완료: 방문 폴더 {foldersVisited}개, 미디어 폴더 {results.Count}개");
             return results;
         }, cancellationToken);
     }
@@ -105,7 +126,8 @@ public sealed class FolderScanner
                     if (scanMode == ScanMode.QuickSync
                         && existingSignatureMap.TryGetValue(directory, out var existingSignature)
                         && existingSignature.DirectoryModifiedAt is not null
-                        && directoryModifiedAt <= existingSignature.DirectoryModifiedAt.Value)
+                        && directoryModifiedAt <= existingSignature.DirectoryModifiedAt.Value
+                        && existingSignature.VideoCount == 0)
                     {
                         summary.ImageFoldersFound++;
                         summary.SkippedFolders++;
@@ -114,29 +136,54 @@ public sealed class FolderScanner
                     }
 
                     var images = GetImages(directory);
-                    if (images.Count > 0)
+                    var videos = GetVideos(directory);
+                    if (images.Count > 0 || videos.Count > 0)
                     {
-                        summary.ImageFoldersFound++;
-                        var result = new FolderScanResult
+                        if (images.Count > 0)
                         {
-                            FolderPath = directory,
-                            DirectoryModifiedAt = directoryModifiedAt,
-                            Images = images
-                        };
-
-                        if (shouldSave(result))
-                        {
-                            saveResult(result);
-                            summary.SavedFolders++;
-                            if (loggedImageFolderCount < 100)
+                            summary.ImageFoldersFound++;
+                            var result = new FolderScanResult
                             {
-                                scanLog.Add($"저장된 이미지 폴더: {directory} ({images.Count}개)");
-                                loggedImageFolderCount++;
+                                FolderPath = directory,
+                                DirectoryModifiedAt = directoryModifiedAt,
+                                Images = images,
+                                Videos = []
+                            };
+
+                            if (shouldSave(result))
+                            {
+                                saveResult(result);
+                                summary.SavedFolders++;
+                                if (loggedImageFolderCount < 100)
+                                {
+                                    scanLog.Add($"저장된 이미지 폴더: {directory} (이미지 {images.Count}개)");
+                                    loggedImageFolderCount++;
+                                }
+                            }
+                            else
+                            {
+                                summary.SkippedFolders++;
                             }
                         }
-                        else
+
+                        foreach (var video in videos)
                         {
-                            summary.SkippedFolders++;
+                            summary.ImageFoldersFound++;
+                            var videoResult = CreateVideoScanResult(video);
+                            if (shouldSave(videoResult))
+                            {
+                                saveResult(videoResult);
+                                summary.SavedFolders++;
+                                if (loggedImageFolderCount < 100)
+                                {
+                                    scanLog.Add($"저장된 영상 파일: {video.FullName}");
+                                    loggedImageFolderCount++;
+                                }
+                            }
+                            else
+                            {
+                                summary.SkippedFolders++;
+                            }
                         }
                     }
 
@@ -155,7 +202,7 @@ public sealed class FolderScanner
                 SkippedFolders = summary.SkippedFolders,
                 CurrentPath = null
             });
-            scanLog.Add($"스캔 완료: 방문 폴더 {summary.FoldersVisited}개, 이미지 폴더 {summary.ImageFoldersFound}개, 저장 {summary.SavedFolders}개, 변경 없음 {summary.SkippedFolders}개 / {stopwatch.Elapsed:mm\\:ss\\.fff}");
+            scanLog.Add($"스캔 완료: 방문 폴더 {summary.FoldersVisited}개, 미디어 폴더 {summary.ImageFoldersFound}개, 저장 {summary.SavedFolders}개, 변경 없음 {summary.SkippedFolders}개 / {stopwatch.Elapsed:mm\\:ss\\.fff}");
             return summary;
         }, cancellationToken);
     }
@@ -222,6 +269,33 @@ public sealed class FolderScanner
         {
             return [];
         }
+    }
+
+    private static List<FileInfo> GetVideos(string directory)
+    {
+        try
+        {
+            return Directory.GetFiles(directory)
+                .Select(path => new FileInfo(path))
+                .Where(file => VideoExtensions.Contains(file.Extension))
+                .OrderBy(file => file.Name, NaturalStringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private static FolderScanResult CreateVideoScanResult(FileInfo video)
+    {
+        return new FolderScanResult
+        {
+            FolderPath = video.FullName,
+            DirectoryModifiedAt = video.LastWriteTime,
+            Images = [],
+            Videos = [video]
+        };
     }
 
     private static DateTime GetDirectoryModifiedAt(string directory)

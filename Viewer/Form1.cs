@@ -23,6 +23,7 @@ public sealed class Form1 : Form
     private readonly Button clearTagFilterButton = new();
     private readonly ComboBox sortComboBox = new();
     private readonly ComboBox quickFilterComboBox = new();
+    private readonly TabControl mediaModeTabs = new();
     private readonly TabControl tabs = new();
     private readonly TabPage randomTabPage = new("랜덤 추천");
     private readonly ListView folderList = new();
@@ -43,6 +44,7 @@ public sealed class Form1 : Form
     private readonly CheckBox reservedCheckBox = new();
     private readonly Button saveButton = new();
     private readonly Button viewButton = new();
+    private readonly Button videoViewButton = new();
     private readonly Button thumbnailButton = new();
     private readonly Button openFolderButton = new();
     private readonly Button copyPathButton = new();
@@ -63,7 +65,7 @@ public sealed class Form1 : Form
 
     private List<FolderItem> folders = [];
     private List<FolderItem> randomFolders = [];
-    private readonly HashSet<long> cycleRandomUsedFolderIds = [];
+    private readonly HashSet<string> cycleRandomUsedKeys = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<string> activeTagFilters = [];
     private readonly List<string> excludedTagFilters = [];
     private readonly List<string> allTagNames = [];
@@ -309,7 +311,25 @@ public sealed class Form1 : Form
         contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 520));
 
-        tabs.Dock = DockStyle.Top;
+        mediaModeTabs.Dock = DockStyle.Fill;
+        mediaModeTabs.Height = 32;
+        mediaModeTabs.TabPages.Add(Localization.T("tabs.imageMode"));
+        mediaModeTabs.TabPages.Add(Localization.T("tabs.videoMode"));
+        mediaModeTabs.SelectedIndexChanged += (_, _) =>
+        {
+            if (suppressTabChanged)
+            {
+                return;
+            }
+
+            cycleRandomSignature = null;
+            cycleRandomUsedKeys.Clear();
+            selectedFolder = null;
+            currentPageIndex = 0;
+            LoadFolders(autoSelectFirst: true);
+        };
+
+        tabs.Dock = DockStyle.Fill;
         tabs.Height = 32;
         tabs.TabPages.Add(Localization.T("tabs.all"));
         tabs.TabPages.Add(Localization.T("tabs.favorites"));
@@ -354,7 +374,7 @@ public sealed class Form1 : Form
         folderList.SelectedIndexChanged += (_, _) => SelectFolderFromList();
         folderList.ColumnClick += (_, columnClickEventArgs) => SortByColumn(columnClickEventArgs.Column);
         folderList.ColumnWidthChanged += (_, _) => SaveColumnWidths();
-        folderList.DoubleClick += (_, _) => OpenViewer();
+        folderList.DoubleClick += (_, _) => OpenSelectedFolderItem();
         folderList.KeyDown += (_, keyEventArgs) =>
         {
             if (keyEventArgs.KeyCode != Keys.Enter || !folderList.Focused)
@@ -362,7 +382,7 @@ public sealed class Form1 : Form
                 return;
             }
 
-            OpenViewer();
+            OpenSelectedFolderItem();
             keyEventArgs.Handled = true;
             keyEventArgs.SuppressKeyPress = true;
         };
@@ -384,10 +404,21 @@ public sealed class Form1 : Form
         folderList.ContextMenuStrip = folderListMenu;
 
         var pagingPanel = BuildPagingPanel();
-        var leftPanel = new Panel { Dock = DockStyle.Fill };
-        leftPanel.Controls.Add(folderList);
-        leftPanel.Controls.Add(pagingPanel);
-        leftPanel.Controls.Add(tabs);
+        pagingPanel.Dock = DockStyle.Fill;
+        var leftPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            RowCount = 4,
+            ColumnCount = 1
+        };
+        leftPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        leftPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
+        leftPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        leftPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        leftPanel.Controls.Add(mediaModeTabs, 0, 0);
+        leftPanel.Controls.Add(tabs, 0, 1);
+        leftPanel.Controls.Add(folderList, 0, 2);
+        leftPanel.Controls.Add(pagingPanel, 0, 3);
 
         var detail = BuildDetailPanel();
         contentLayout.Controls.Add(leftPanel, 0, 0);
@@ -616,8 +647,11 @@ public sealed class Form1 : Form
         saveButton.Text = "저장";
         saveButton.Click += (_, _) => SaveSelectedFolder();
 
-        viewButton.Text = "보기";
+        viewButton.Text = "이미지 보기";
         viewButton.Click += (_, _) => OpenViewer();
+
+        videoViewButton.Text = "영상 보기";
+        videoViewButton.Click += (_, _) => OpenVideoViewer();
 
         thumbnailButton.Text = "썸네일 선택";
         thumbnailButton.Click += (_, _) => ChooseThumbnail();
@@ -636,13 +670,14 @@ public sealed class Form1 : Form
 
         StyleDetailButton(saveButton, "현재 상세 패널의 이름, 작가, 점수, 태그, 메모, 즐겨찾기, 보류함 상태를 DB에 저장합니다.");
         StyleDetailButton(viewButton, "선택한 폴더의 이미지를 뷰어 창으로 엽니다.");
+        StyleDetailButton(videoViewButton, "선택한 폴더의 영상을 외부 플레이어로 재생하는 전용 창을 엽니다.");
         StyleDetailButton(thumbnailButton, "선택한 폴더 안의 이미지 중 하나를 목록 썸네일로 지정합니다.");
         StyleDetailButton(openFolderButton, "선택한 폴더를 파일 탐색기로 엽니다.");
         StyleDetailButton(copyPathButton, "선택한 폴더 경로를 클립보드에 복사합니다.");
         StyleDetailButton(moveToMainRootButton, "신규등록 폴더를 선택한 메인 루트 아래로 이동하고 DB 경로를 즉시 갱신합니다.");
         StyleDetailButton(deleteFolderButton, "실제 파일은 유지하고 이 폴더를 DB 목록에서만 제거합니다.");
 
-        buttons.Controls.AddRange([saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton]);
+        buttons.Controls.AddRange([saveButton, viewButton, videoViewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton]);
         panel.Controls.Add(buttons, 1, 12);
 
         foreach (Control control in panel.Controls)
@@ -769,7 +804,7 @@ public sealed class Form1 : Form
         LoadTagFilters();
         LoadSeriesNames();
         LoadFolders(autoSelectFirst: false);
-        var rootCount = database.GetRoots().Count;
+        var rootCount = database.GetRoots(mediaKind: GetCurrentMediaKind()).Count;
         statusLabel.Text = rootCount == 0
             ? "루트 폴더를 추가한 뒤 스캔/동기화를 실행하세요."
             : $"루트 {rootCount}개 등록됨";
@@ -812,29 +847,12 @@ public sealed class Form1 : Form
             return;
         }
 
-        var message = CreateUpdatePromptMessage(result);
-        var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+        using var updatePrompt = new UpdatePromptForm(result);
+        var dialogResult = updatePrompt.ShowDialog(this);
         if (dialogResult == DialogResult.Yes)
         {
             await DownloadOrOpenUpdateAsync(result);
         }
-    }
-
-    private static string CreateUpdatePromptMessage(UpdateCheckResult result)
-    {
-        if (!string.IsNullOrWhiteSpace(result.AssetDownloadUrl))
-        {
-            return string.Format(
-                Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n파일: {2}\n\n업데이트 파일을 다운로드할까요?"),
-                result.CurrentVersion,
-                result.LatestVersion,
-                result.AssetName);
-        }
-
-        return string.Format(
-            Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?"),
-            result.CurrentVersion,
-            result.LatestVersion);
     }
 
     private async Task DownloadOrOpenUpdateAsync(UpdateCheckResult result)
@@ -881,12 +899,14 @@ public sealed class Form1 : Form
 
     private async Task ScanAsync(ScanMode scanMode, RootKind? rootKind = null)
     {
-        var roots = database.GetRoots(rootKind);
+        var mediaKind = GetCurrentMediaKind();
+        var roots = database.GetRoots(rootKind, mediaKind);
         if (roots.Count == 0)
         {
+            var mediaText = mediaKind == MediaKind.Video ? "영상" : "이미지";
             var rootMessage = rootKind == RootKind.Incoming
-                ? "먼저 신규등록 루트 폴더를 추가하세요."
-                : "먼저 루트 폴더를 추가하세요.";
+                ? $"먼저 {mediaText} 신규등록 루트 폴더를 추가하세요."
+                : $"먼저 {mediaText} 루트 폴더를 추가하세요.";
             MessageBox.Show(this, rootMessage, "스캔", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
@@ -916,7 +936,7 @@ public sealed class Form1 : Form
             var existingSignatureMap = await Task.Run(() =>
             {
                 scanCancellationTokenSource.Token.ThrowIfCancellationRequested();
-                return database.GetFolderScanSignatureMap(rootKind);
+                return database.GetFolderScanSignatureMap(rootKind, mediaKind);
             }, scanCancellationTokenSource.Token);
             scanLog.Add($"기존 DB 상태 확인 완료: {existingSignatureMap.Count}개 / {databaseStateStopwatch.Elapsed:mm\\:ss\\.fff}");
 
@@ -933,7 +953,9 @@ public sealed class Form1 : Form
                         || result.DirectoryModifiedAt > existingSignature.DirectoryModifiedAt.Value
                         || result.FolderModifiedAt > existingSignature.FolderModifiedAt
                         || result.ImageCount != existingSignature.ImageCount
-                        || result.TotalImageBytes != existingSignature.TotalImageBytes;
+                        || result.TotalImageBytes != existingSignature.TotalImageBytes
+                        || result.VideoCount != existingSignature.VideoCount
+                        || result.TotalVideoBytes != existingSignature.TotalVideoBytes;
                 },
                 result => scanWriteSession.Save(result),
                 progress,
@@ -942,13 +964,19 @@ public sealed class Form1 : Form
             scanWriteSession.Commit();
             scanLog.Add($"변경분 DB 저장 완료: 저장 {summary.SavedFolders}개 / 변경 없음 {summary.SkippedFolders}개");
 
+            var removedLegacyVideoFolders = database.RemoveLegacyAggregateVideoFolders(rootKind, mediaKind);
+            if (removedLegacyVideoFolders > 0)
+            {
+                scanLog.Add($"기존 영상 폴더 묶음 정리 완료: {removedLegacyVideoFolders}개");
+            }
+
             progressForm.UpdateStatus("누락 폴더 정리 중...");
             scanLog.Add("누락 폴더 정리 시작");
             var cleanupStopwatch = System.Diagnostics.Stopwatch.StartNew();
             var cleanupSummary = await Task.Run(() =>
             {
                 scanCancellationTokenSource.Token.ThrowIfCancellationRequested();
-                return database.RemoveMissingFoldersAndImages(checkImageFiles: false, rootKind: rootKind);
+                return database.RemoveMissingFoldersAndImages(checkImageFiles: false, rootKind: rootKind, mediaKind: mediaKind);
             }, scanCancellationTokenSource.Token);
             scanLog.Add($"누락 폴더 정리 완료: 삭제 폴더 {cleanupSummary.RemovedFolders}개 / 삭제 이미지 {cleanupSummary.RemovedImages}개 / {cleanupStopwatch.Elapsed:mm\\:ss\\.fff}");
             summary.RemovedFolders = cleanupSummary.RemovedFolders;
@@ -1125,7 +1153,7 @@ public sealed class Form1 : Form
             _ => QuickFilterMode.All
         };
 
-        var result = database.GetFolders(mode, sortMode, searchField, searchBox.Text, activeTagFilters, excludedTagFilters, tagFilterMode, quickFilterMode);
+        var result = database.GetFolders(mode, sortMode, searchField, searchBox.Text, activeTagFilters, excludedTagFilters, tagFilterMode, quickFilterMode, IsVideoMode());
         return result;
     }
 
@@ -1147,7 +1175,8 @@ public sealed class Form1 : Form
             quickFilterMode,
             currentPageIndex * pageSize,
             pageSize,
-            sortDescending);
+            sortDescending,
+            IsVideoMode());
         if (result.TotalCount > 0 && result.Items.Count == 0 && currentPageIndex > 0)
         {
             currentPageIndex = Math.Max(0, (result.TotalCount - 1) / pageSize);
@@ -1162,7 +1191,8 @@ public sealed class Form1 : Form
                 quickFilterMode,
                 currentPageIndex * pageSize,
                 pageSize,
-                sortDescending);
+                sortDescending,
+                IsVideoMode());
         }
 
         folders = result.Items;
@@ -1237,6 +1267,16 @@ public sealed class Form1 : Form
         };
     }
 
+    private bool IsVideoMode()
+    {
+        return mediaModeTabs.SelectedIndex == 1;
+    }
+
+    private MediaKind GetCurrentMediaKind()
+    {
+        return IsVideoMode() ? MediaKind.Video : MediaKind.Image;
+    }
+
     private void PopulateFolderList(long? selectedId, bool autoSelectFirst)
     {
         var viewport = CaptureFolderListViewport();
@@ -1251,6 +1291,7 @@ public sealed class Form1 : Form
 
         ClampCurrentPage();
         var visibleFolders = GetCurrentPageFolders();
+        ApplyListModeChrome();
         folderList.BeginUpdate();
         folderList.Items.Clear();
         foreach (var folder in visibleFolders)
@@ -1316,6 +1357,20 @@ public sealed class Form1 : Form
         UpdateListStatus();
     }
 
+    private void ApplyListModeChrome()
+    {
+        if (folderList.Columns.Count <= 7)
+        {
+            return;
+        }
+
+        folderList.Columns[7].Text = IsVideoMode() ? "영상" : "이미지";
+        if (sortComboBox.Items.Count > 6)
+        {
+            sortComboBox.Items[6] = IsVideoMode() ? "영상 수 순" : "이미지 수 순";
+        }
+    }
+
     private void UpdateFolderListItem(ListViewItem item, FolderItem folder)
     {
         item.Text = folder.DisplayName;
@@ -1325,7 +1380,7 @@ public sealed class Form1 : Form
         SetListSubItem(item, 4, folder.SeriesName ?? "");
         SetListSubItem(item, 5, folder.SeriesOrder?.ToString() ?? "");
         SetListSubItem(item, 6, Shorten(folder.Memo, 80));
-        SetListSubItem(item, 7, folder.ImageCount.ToString());
+        SetListSubItem(item, 7, IsVideoMode() ? folder.VideoCount.ToString() : folder.ImageCount.ToString());
         SetListSubItem(item, 8, folder.FolderModifiedAt?.ToString("yyyy-MM-dd") ?? "");
         item.BackColor = string.IsNullOrWhiteSpace(folder.SeriesName)
             ? folderList.BackColor
@@ -1460,9 +1515,10 @@ public sealed class Form1 : Form
 
     private void ShowRandomFolders()
     {
+        var mediaName = IsVideoMode() ? "영상" : "이미지";
         var tagFilterMode = GetCurrentTagFilterMode();
         var quickFilterMode = GetCurrentQuickFilterMode();
-        var countProbe = database.GetFoldersPage(
+        var allCandidates = database.GetFolders(
             GetCurrentFolderListMode(),
             GetCurrentSortMode(),
             GetCurrentSearchField(),
@@ -1471,13 +1527,26 @@ public sealed class Form1 : Form
             excludedTagFilters,
             tagFilterMode,
             quickFilterMode,
-            0,
-            1,
-            sortDescending);
-        var candidateCount = countProbe.TotalCount;
+            IsVideoMode());
+        if (allCandidates.Count == 0)
+        {
+            MessageBox.Show(this, $"랜덤으로 고를 {mediaName} 폴더가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        var seriesNames = allCandidates
+            .Select(folder => folder.SeriesName)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Select(name => name!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var seriesImageCounts = database.GetSeriesImageCounts(seriesNames);
+        var firstSeriesFolders = database.GetFirstFoldersInSeries(seriesNames, IsVideoMode());
+        var baseCandidates = BuildRandomCandidates(allCandidates, seriesImageCounts, firstSeriesFolders, 0, null, IsVideoMode());
+        var candidateCount = baseCandidates.Count;
         if (candidateCount == 0)
         {
-            MessageBox.Show(this, "랜덤으로 고를 이미지 폴더가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, $"랜덤으로 고를 {mediaName} 폴더가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1500,30 +1569,13 @@ public sealed class Form1 : Form
         if (dialog.CycleResetRequested)
         {
             cycleRandomSignature = null;
-            cycleRandomUsedFolderIds.Clear();
+            cycleRandomUsedKeys.Clear();
         }
 
-        var allCandidates = database.GetFolders(
-            GetCurrentFolderListMode(),
-            GetCurrentSortMode(),
-            GetCurrentSearchField(),
-            searchBox.Text,
-            activeTagFilters,
-            excludedTagFilters,
-            tagFilterMode,
-            quickFilterMode);
-        var seriesNames = allCandidates
-            .Select(folder => folder.SeriesName)
-            .Where(name => !string.IsNullOrWhiteSpace(name))
-            .Select(name => name!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var seriesImageCounts = database.GetSeriesImageCounts(seriesNames);
-        var firstSeriesFolders = database.GetFirstFoldersInSeries(seriesNames);
-        var filteredCandidates = BuildRandomCandidates(allCandidates, seriesImageCounts, firstSeriesFolders, dialog.MinImageCount, dialog.MaxImageCount);
+        var filteredCandidates = BuildRandomCandidates(allCandidates, seriesImageCounts, firstSeriesFolders, dialog.MinImageCount, dialog.MaxImageCount, IsVideoMode());
         if (filteredCandidates.Count == 0)
         {
-            MessageBox.Show(this, "이미지 개수 조건에 맞는 랜덤 후보가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, $"{mediaName} 개수 조건에 맞는 랜덤 후보가 없습니다.", "랜덤", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
@@ -1535,15 +1587,15 @@ public sealed class Form1 : Form
             if (!string.Equals(cycleRandomSignature, nextSignature, StringComparison.Ordinal))
             {
                 cycleRandomSignature = nextSignature;
-                cycleRandomUsedFolderIds.Clear();
+                cycleRandomUsedKeys.Clear();
             }
 
             candidatePool = filteredCandidates
-                .Where(folder => !cycleRandomUsedFolderIds.Contains(folder.Id))
+                .Where(folder => !cycleRandomUsedKeys.Contains(GetCycleRandomKey(folder)))
                 .ToList();
             if (candidatePool.Count == 0)
             {
-                cycleRandomUsedFolderIds.Clear();
+                cycleRandomUsedKeys.Clear();
                 candidatePool = filteredCandidates;
             }
         }
@@ -1559,17 +1611,17 @@ public sealed class Form1 : Form
             var resetAfterThisPick = candidatePool.Count <= dialog.RecommendCount;
             if (resetAfterThisPick)
             {
-                cycleRandomUsedFolderIds.Clear();
+                cycleRandomUsedKeys.Clear();
                 cycleText = $" / {Localization.T("순회 초기화")}";
             }
             else
             {
                 foreach (var recommendedFolder in recommendedFolders)
                 {
-                    cycleRandomUsedFolderIds.Add(recommendedFolder.Id);
+                    cycleRandomUsedKeys.Add(GetCycleRandomKey(recommendedFolder));
                 }
 
-                var remainingCount = filteredCandidates.Count - cycleRandomUsedFolderIds.Count;
+                var remainingCount = filteredCandidates.Count - cycleRandomUsedKeys.Count;
                 cycleText = $" / {string.Format(Localization.T("순회 남음 {0}개"), remainingCount.ToString("N0"))}";
             }
         }
@@ -1590,18 +1642,26 @@ public sealed class Form1 : Form
         selectedFolder = null;
         PopulateFolderList(null, autoSelectFirst: true);
         var maxImageText = dialog.MaxImageCount is null ? "제한 없음" : dialog.MaxImageCount.Value.ToString("N0");
-        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {filteredCandidates.Count:N0}개 / 이미지 {dialog.MinImageCount:N0}-{maxImageText}{cycleText}";
+        var visibleCandidateCount = dialog.CycleRandomEnabled ? candidatePool.Count : filteredCandidates.Count;
+        statusLabel.Text = $"랜덤 추천 {folders.Count}개 / 후보 {visibleCandidateCount:N0}개 / {mediaName} {dialog.MinImageCount:N0}-{maxImageText}{cycleText}";
     }
 
     private static string BuildCycleRandomSignature(IReadOnlyList<FolderItem> candidates)
     {
         var hashCode = new HashCode();
-        foreach (var folderId in candidates.Select(folder => folder.Id).Order())
+        foreach (var candidateKey in candidates.Select(GetCycleRandomKey).Order(StringComparer.OrdinalIgnoreCase))
         {
-            hashCode.Add(folderId);
+            hashCode.Add(candidateKey, StringComparer.OrdinalIgnoreCase);
         }
 
         return $"{candidates.Count}:{hashCode.ToHashCode()}";
+    }
+
+    private static string GetCycleRandomKey(FolderItem folder)
+    {
+        return string.IsNullOrWhiteSpace(folder.SeriesName)
+            ? $"folder:{folder.Id}"
+            : $"series:{folder.SeriesName.Trim()}";
     }
 
     private static List<FolderItem> BuildRandomCandidates(
@@ -1609,22 +1669,25 @@ public sealed class Form1 : Form
         IReadOnlyDictionary<string, int> seriesImageCounts,
         IReadOnlyDictionary<string, FolderItem> firstSeriesFolders,
         int minImageCount,
-        int? maxImageCount)
+        int? maxImageCount,
+        bool videoMode)
     {
         var result = new List<FolderItem>();
         var addedKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var candidate in candidates)
         {
             var seriesName = candidate.SeriesName;
-            var imageCount = string.IsNullOrWhiteSpace(seriesName)
-                ? candidate.ImageCount
-                : seriesImageCounts.GetValueOrDefault(seriesName, candidate.ImageCount);
+            var imageCount = videoMode
+                ? candidate.VideoCount
+                : string.IsNullOrWhiteSpace(seriesName)
+                    ? candidate.ImageCount
+                    : seriesImageCounts.GetValueOrDefault(seriesName, candidate.ImageCount);
             if (imageCount < minImageCount || (maxImageCount is not null && imageCount > maxImageCount.Value))
             {
                 continue;
             }
 
-            var key = string.IsNullOrWhiteSpace(seriesName) ? $"folder:{candidate.Id}" : $"series:{seriesName}";
+            var key = string.IsNullOrWhiteSpace(seriesName) ? $"folder:{candidate.Id}" : $"series:{seriesName.Trim()}";
             if (!addedKeys.Add(key))
             {
                 continue;
@@ -1667,9 +1730,13 @@ public sealed class Form1 : Form
         loadingDetails = true;
         selectedFolder = folder;
         SetDetailsEnabled(true);
+        var isVideoMode = IsVideoMode();
         deleteFolderButton.Text = Localization.T(GetCurrentFolderListMode() == FolderListMode.NewRegistration ? "폴더 삭제" : "DB에서 제거");
         moveToMainRootButton.Visible = GetCurrentFolderListMode() == FolderListMode.NewRegistration;
         moveToMainRootButton.Enabled = moveToMainRootButton.Visible;
+        viewButton.Visible = !isVideoMode;
+        thumbnailButton.Visible = !isVideoMode;
+        videoViewButton.Visible = isVideoMode;
         displayNameBox.Text = folder.DisplayName;
         authorBox.Text = folder.Author ?? "";
         numberBox.Text = folder.Number ?? "";
@@ -1681,15 +1748,19 @@ public sealed class Form1 : Form
         pathBox.Text = folder.Path;
         favoriteCheckBox.Checked = folder.IsFavorite;
         reservedCheckBox.Checked = folder.IsReserved;
+        var videos = database.GetVideos(folder.Id).Where(video => File.Exists(video.Path)).ToList();
         var lastImageName = string.IsNullOrWhiteSpace(folder.LastImagePath) ? "-" : Path.GetFileName(folder.LastImagePath);
         var seriesText = GetSeriesStatsText(folder);
-        statsLabel.Text = string.Format(
-            Localization.T("detail.stats"),
-            folder.ImageCount,
-            folder.ViewCount,
-            seriesText,
-            folder.LastViewedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-",
-            lastImageName);
+        statsLabel.Text = isVideoMode
+            ? $"영상 {videos.Count:N0}개 / 용량 {FormatByteSize(folder.TotalVideoBytes)}"
+            : string.Format(
+                Localization.T("detail.stats"),
+                folder.ImageCount,
+                folder.ViewCount,
+                seriesText,
+                folder.LastViewedAt?.ToString("yyyy-MM-dd HH:mm") ?? "-",
+                lastImageName);
+        videoViewButton.Enabled = videos.Count > 0;
         LoadThumbnailAsync(folder);
         loadingDetails = false;
     }
@@ -1724,6 +1795,10 @@ public sealed class Form1 : Form
         reservedCheckBox.Checked = false;
         thumbnailBox.Image?.Dispose();
         thumbnailBox.Image = null;
+        var isVideoMode = IsVideoMode();
+        viewButton.Visible = !isVideoMode;
+        thumbnailButton.Visible = !isVideoMode;
+        videoViewButton.Visible = isVideoMode;
         SetDetailsEnabled(false);
     }
 
@@ -1755,16 +1830,19 @@ public sealed class Form1 : Form
 
     private void OpenSelectedFolderInExplorer()
     {
-        if (selectedFolder is null || !Directory.Exists(selectedFolder.Path))
+        if (selectedFolder is null || !EntryPathExists(selectedFolder.Path))
         {
             MessageBox.Show(this, "열 수 있는 폴더가 없습니다.", "폴더 열기", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
 
+        var explorerArguments = Directory.Exists(selectedFolder.Path)
+            ? $"\"{selectedFolder.Path}\""
+            : $"/select,\"{selectedFolder.Path}\"";
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
         {
             FileName = "explorer.exe",
-            Arguments = $"\"{selectedFolder.Path}\"",
+            Arguments = explorerArguments,
             UseShellExecute = true
         });
     }
@@ -1812,11 +1890,11 @@ public sealed class Form1 : Form
         var movableFolders = targetFolders.Where(folder => Directory.Exists(folder.Path)).ToList();
         if (movableFolders.Count == 0)
         {
-            MessageBox.Show(this, "실제 폴더가 없어 이동할 수 없습니다.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, "메인 이동은 폴더 항목만 사용할 수 있습니다.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
 
-        var mainRoots = database.GetRoots(RootKind.Main).Where(Directory.Exists).ToList();
+        var mainRoots = database.GetRoots(RootKind.Main, GetCurrentMediaKind()).Where(Directory.Exists).ToList();
         if (mainRoots.Count == 0)
         {
             MessageBox.Show(this, "이동할 메인 루트가 없습니다. 설정에서 메인 루트를 추가하세요.", "메인으로 이동", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -1868,6 +1946,17 @@ public sealed class Form1 : Form
         }
     }
 
+    private void OpenSelectedFolderItem()
+    {
+        if (IsVideoMode())
+        {
+            OpenVideoViewer();
+            return;
+        }
+
+        OpenViewer();
+    }
+
     private void OpenViewer()
     {
         if (selectedFolder is null)
@@ -1895,6 +1984,31 @@ public sealed class Form1 : Form
         viewer.ShowDialog(this);
         database.UpdateLastImagePath(selectedFolder.Id, viewer.CurrentImagePath);
         RefreshFolderFromDatabase(selectedFolder.Id);
+    }
+
+    private void OpenVideoViewer()
+    {
+        if (selectedFolder is null)
+        {
+            return;
+        }
+
+        if (SaveSeriesMetadataBeforeViewing())
+        {
+            return;
+        }
+
+        var videos = ShouldOpenAsSeries(selectedFolder)
+            ? database.GetSeriesVideos(selectedFolder.SeriesName!).Where(video => File.Exists(video.Path)).ToList()
+            : database.GetVideos(selectedFolder.Id).Where(video => File.Exists(video.Path)).ToList();
+        if (videos.Count == 0)
+        {
+            MessageBox.Show(this, "열 수 있는 영상이 없습니다. 스캔/동기화를 다시 실행해 보세요.", "영상 보기", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var viewer = new VideoViewerForm(videos);
+        viewer.ShowDialog(this);
     }
 
     private bool ShouldOpenAsSeries(FolderItem folder)
@@ -1998,13 +2112,7 @@ public sealed class Form1 : Form
 
         try
         {
-            if (Directory.Exists(selectedFolder.Path))
-            {
-                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
-                    selectedFolder.Path,
-                    Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                    Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-            }
+            MoveEntryToRecycleBin(selectedFolder.Path);
 
             database.DeleteFolder(selectedFolder.Id);
             statusLabel.Text = $"신규등록 폴더 삭제됨: {selectedFolder.DisplayName}";
@@ -2082,7 +2190,7 @@ public sealed class Form1 : Form
 
                     try
                     {
-                        return new ThumbnailLoadResult(ImageLoader.LoadBitmapCopy(candidatePath), candidatePath);
+                        return new ThumbnailLoadResult(MediaThumbnailLoader.LoadThumbnailCopy(candidatePath, new Size(320, 320)), candidatePath);
                     }
                     catch (Exception exception)
                     {
@@ -2123,6 +2231,7 @@ public sealed class Form1 : Form
         try
         {
             paths.AddRange(database.GetImages(folder.Id).Select(image => image.Path));
+            paths.AddRange(database.GetVideos(folder.Id).Select(video => video.Path));
         }
         catch (Exception exception)
         {
@@ -2139,7 +2248,7 @@ public sealed class Form1 : Form
 
     private void SetDetailsEnabled(bool enabled)
     {
-        foreach (var control in new Control[] { displayNameBox, authorBox, numberBox, seriesNameBox, seriesOrderBox, scoreBox, tagsBox, memoBox, favoriteCheckBox, reservedCheckBox, saveButton, viewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton })
+        foreach (var control in new Control[] { displayNameBox, authorBox, numberBox, seriesNameBox, seriesOrderBox, scoreBox, tagsBox, memoBox, favoriteCheckBox, reservedCheckBox, saveButton, viewButton, videoViewButton, thumbnailButton, openFolderButton, copyPathButton, moveToMainRootButton, deleteFolderButton })
         {
             control.Enabled = enabled;
         }
@@ -2554,13 +2663,7 @@ public sealed class Form1 : Form
         {
             try
             {
-                if (Directory.Exists(folder.Path))
-                {
-                    Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
-                        folder.Path,
-                        Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
-                        Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-                }
+                MoveEntryToRecycleBin(folder.Path);
 
                 deletedIds.Add(folder.Id);
             }
@@ -3065,6 +3168,12 @@ public sealed class Form1 : Form
             tagFilterButton.Text = activeTagFilters.Count == 0 ? Localization.T("toolbar.tag") : tagFilterButton.Text;
             excludedTagFilterButton.Text = excludedTagFilters.Count == 0 ? Localization.T("toolbar.excludedTag") : excludedTagFilterButton.Text;
             clearTagFilterButton.Text = Localization.T("toolbar.clear");
+            if (mediaModeTabs.TabPages.Count >= 2)
+            {
+                mediaModeTabs.TabPages[0].Text = Localization.T("tabs.imageMode");
+                mediaModeTabs.TabPages[1].Text = Localization.T("tabs.videoMode");
+            }
+
             if (tabs.TabPages.Count >= 6)
             {
                 tabs.TabPages[0].Text = Localization.T("tabs.all");
@@ -3076,6 +3185,7 @@ public sealed class Form1 : Form
             }
 
             randomTabPage.Text = Localization.T("menu.random");
+            ApplyListModeChrome();
         }
         finally
         {
@@ -3432,6 +3542,44 @@ public sealed class Form1 : Form
         return dialog.ShowDialog() == DialogResult.OK ? comboBox.SelectedItem?.ToString() : null;
     }
 
+    private static string FormatByteSize(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        var size = (double)Math.Max(0, bytes);
+        var unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return unitIndex == 0 ? $"{size:N0} {units[unitIndex]}" : $"{size:N1} {units[unitIndex]}";
+    }
+
+    private static bool EntryPathExists(string path)
+    {
+        return Directory.Exists(path) || File.Exists(path);
+    }
+
+    private static void MoveEntryToRecycleBin(string path)
+    {
+        if (Directory.Exists(path))
+        {
+            Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(
+                path,
+                Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            return;
+        }
+
+        if (File.Exists(path))
+        {
+            Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
+                path,
+                Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs,
+                Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+        }
+    }
 }
 
 public sealed record SeriesGuessCandidate(FolderItem Folder, (string SeriesName, int SeriesOrder)? Guess);

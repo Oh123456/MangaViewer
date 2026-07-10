@@ -8,6 +8,8 @@ public sealed class SettingsForm : Form
     private readonly ListBox tagListBox = new();
     private readonly Button addRootButton = new();
     private readonly Button addIncomingRootButton = new();
+    private readonly Button addVideoRootButton = new();
+    private readonly Button addIncomingVideoRootButton = new();
     private readonly Button deleteRootButton = new();
     private readonly Button renameRootButton = new();
     private readonly Button openDatabaseFolderButton = new();
@@ -27,6 +29,8 @@ public sealed class SettingsForm : Form
     private readonly ComboBox languageComboBox = new();
     private readonly ComboBox viewerImageLoadingModeComboBox = new();
     private readonly CheckBox viewerLoopPagesCheckBox = new();
+    private readonly TextBox videoPlayerPathBox = new();
+    private readonly Button chooseVideoPlayerButton = new();
     private readonly CheckBox autoCheckForUpdatesCheckBox = new();
     private readonly TextBox updateReleaseApiUrlBox = new();
     private readonly Button checkUpdatesButton = new();
@@ -61,15 +65,20 @@ public sealed class SettingsForm : Form
 
         var rootsPage = new TabPage("루트");
         var filePage = new TabPage("파일");
-        var viewerPage = new TabPage("뷰어");
+        var imageSettingsPage = new TabPage("이미지 설정");
+        var videoSettingsPage = new TabPage("영상 설정");
         var maintenancePage = new TabPage("유지관리");
         var updatePage = new TabPage("업데이트");
         var tagsPage = new TabPage("태그");
 
-        addRootButton.Text = "메인 루트 추가";
-        addRootButton.Click += (_, _) => AddRoot(RootKind.Main);
-        addIncomingRootButton.Text = "신규 루트 추가";
-        addIncomingRootButton.Click += (_, _) => AddRoot(RootKind.Incoming);
+        addRootButton.Text = "이미지 메인";
+        addRootButton.Click += (_, _) => AddRoot(RootKind.Main, MediaKind.Image);
+        addIncomingRootButton.Text = "이미지 신규";
+        addIncomingRootButton.Click += (_, _) => AddRoot(RootKind.Incoming, MediaKind.Image);
+        addVideoRootButton.Text = "영상 메인";
+        addVideoRootButton.Click += (_, _) => AddRoot(RootKind.Main, MediaKind.Video);
+        addIncomingVideoRootButton.Text = "영상 신규";
+        addIncomingVideoRootButton.Click += (_, _) => AddRoot(RootKind.Incoming, MediaKind.Video);
         deleteRootButton.Text = "루트 삭제";
         deleteRootButton.Click += (_, _) => DeleteSelectedRoots();
         renameRootButton.Text = "이름 변경";
@@ -82,10 +91,10 @@ public sealed class SettingsForm : Form
             RowCount = 3,
             ColumnCount = 1
         };
-        rootsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        rootsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 82));
         rootsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
         rootsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        rootsLayout.Controls.Add(CreateButtonPanel(addRootButton, addIncomingRootButton, renameRootButton, deleteRootButton), 0, 0);
+        rootsLayout.Controls.Add(CreateButtonPanel(addRootButton, addIncomingRootButton, addVideoRootButton, addIncomingVideoRootButton, renameRootButton, deleteRootButton), 0, 0);
         rootsLayout.Controls.Add(new Label
         {
             Text = "루트 경로",
@@ -146,25 +155,43 @@ public sealed class SettingsForm : Form
         }, 0, 3);
         filePage.Controls.Add(fileLayout);
 
-        var viewerLayout = new TableLayoutPanel
+        var imageSettingsLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             Padding = new Padding(12),
             RowCount = 3,
             ColumnCount = 1
         };
-        viewerLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        viewerLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
-        viewerLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-        viewerLayout.Controls.Add(CreateViewerImageLoadingModePanel(), 0, 0);
-        viewerLayout.Controls.Add(CreateViewerLoopPagesPanel(), 0, 1);
-        viewerLayout.Controls.Add(new Label
+        imageSettingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        imageSettingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
+        imageSettingsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        imageSettingsLayout.Controls.Add(CreateViewerImageLoadingModePanel(), 0, 0);
+        imageSettingsLayout.Controls.Add(CreateViewerLoopPagesPanel(), 0, 1);
+        imageSettingsLayout.Controls.Add(new Label
         {
             Text = "이미지 뷰어의 표시 방식과 페이지 이동 방식을 설정합니다.",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.TopLeft
         }, 0, 2);
-        viewerPage.Controls.Add(viewerLayout);
+        imageSettingsPage.Controls.Add(imageSettingsLayout);
+
+        var videoSettingsLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            Padding = new Padding(12),
+            RowCount = 2,
+            ColumnCount = 1
+        };
+        videoSettingsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+        videoSettingsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        videoSettingsLayout.Controls.Add(CreateVideoPlayerPathPanel(), 0, 0);
+        videoSettingsLayout.Controls.Add(new Label
+        {
+            Text = "영상 모드는 외부 플레이어를 사용합니다. 비워두면 Windows 기본 프로그램으로 재생합니다.",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.TopLeft
+        }, 0, 1);
+        videoSettingsPage.Controls.Add(videoSettingsLayout);
 
         cleanupMissingButton.Text = "누락 정리";
         cleanupMissingButton.Click += async (_, _) => await CleanupMissingAsync();
@@ -324,7 +351,7 @@ public sealed class SettingsForm : Form
         tagLabel.MouseDown += (_, _) => ClearListSelections();
         tagButtons.MouseDown += (_, _) => ClearListSelections();
 
-        tabs.TabPages.AddRange([rootsPage, filePage, viewerPage, maintenancePage, updatePage, tagsPage]);
+        tabs.TabPages.AddRange([rootsPage, filePage, imageSettingsPage, videoSettingsPage, maintenancePage, updatePage, tagsPage]);
         Controls.Add(tabs);
     }
 
@@ -460,6 +487,39 @@ public sealed class SettingsForm : Form
         return panel;
     }
 
+    private Control CreateVideoPlayerPathPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
+
+        panel.Controls.Add(new Label
+        {
+            Text = "영상 플레이어",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft
+        }, 0, 0);
+
+        videoPlayerPathBox.Text = AppSettings.Current.VideoPlayerPath;
+        videoPlayerPathBox.Dock = DockStyle.Fill;
+        videoPlayerPathBox.PlaceholderText = "비워두면 기본 프로그램 사용";
+        videoPlayerPathBox.Leave += (_, _) => SaveVideoPlayerPath();
+
+        chooseVideoPlayerButton.Text = "선택";
+        chooseVideoPlayerButton.Dock = DockStyle.Fill;
+        chooseVideoPlayerButton.Click += (_, _) => ChooseVideoPlayer();
+
+        panel.Controls.Add(videoPlayerPathBox, 1, 0);
+        panel.Controls.Add(chooseVideoPlayerButton, 2, 0);
+        return panel;
+    }
+
     private void ApplyLocalization()
     {
         Localization.ApplyTo(this);
@@ -476,6 +536,35 @@ public sealed class SettingsForm : Form
 
         AppSettings.Current.UpdateReleaseApiUrl = releaseApiUrl;
         AppSettings.Save();
+    }
+
+    private void SaveVideoPlayerPath()
+    {
+        var playerPath = videoPlayerPathBox.Text.Trim();
+        if (string.Equals(AppSettings.Current.VideoPlayerPath, playerPath, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        AppSettings.Current.VideoPlayerPath = playerPath;
+        AppSettings.Save();
+    }
+
+    private void ChooseVideoPlayer()
+    {
+        using var dialog = new OpenFileDialog
+        {
+            Title = "영상 플레이어 선택",
+            Filter = "Executable Files|*.exe|All Files|*.*",
+            CheckFileExists = true
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        videoPlayerPathBox.Text = dialog.FileName;
+        SaveVideoPlayerPath();
     }
 
     private async Task CheckForUpdatesAsync(bool showNoUpdateMessage)
@@ -506,8 +595,8 @@ public sealed class SettingsForm : Form
                 return;
             }
 
-            var message = CreateUpdatePromptMessage(result);
-            var dialogResult = MessageBox.Show(this, message, Localization.T("업데이트 발견"), MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            using var updatePrompt = new UpdatePromptForm(result);
+            var dialogResult = updatePrompt.ShowDialog(this);
             if (dialogResult == DialogResult.Yes)
             {
                 await DownloadOrOpenUpdateAsync(result);
@@ -517,23 +606,6 @@ public sealed class SettingsForm : Form
         {
             checkUpdatesButton.Enabled = true;
         }
-    }
-
-    private static string CreateUpdatePromptMessage(UpdateCheckResult result)
-    {
-        if (!string.IsNullOrWhiteSpace(result.AssetDownloadUrl))
-        {
-            return string.Format(
-                Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n파일: {2}\n\n업데이트 파일을 다운로드할까요?"),
-                result.CurrentVersion,
-                result.LatestVersion,
-                result.AssetName);
-        }
-
-        return string.Format(
-            Localization.T("새 버전이 있습니다.\n\n현재 버전: {0}\n최신 버전: {1}\n\n릴리즈 페이지를 열까요?"),
-            result.CurrentVersion,
-            result.LatestVersion);
     }
 
     private async Task DownloadOrOpenUpdateAsync(UpdateCheckResult result)
@@ -581,14 +653,24 @@ public sealed class SettingsForm : Form
     private void LoadRoots()
     {
         rootListBox.Items.Clear();
-        foreach (var rootPath in database.GetRoots(RootKind.Main))
+        foreach (var rootPath in database.GetRoots(RootKind.Main, MediaKind.Image))
         {
-            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Main));
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Main, MediaKind.Image));
         }
 
-        foreach (var rootPath in database.GetRoots(RootKind.Incoming))
+        foreach (var rootPath in database.GetRoots(RootKind.Incoming, MediaKind.Image))
         {
-            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Incoming));
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Incoming, MediaKind.Image));
+        }
+
+        foreach (var rootPath in database.GetRoots(RootKind.Main, MediaKind.Video))
+        {
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Main, MediaKind.Video));
+        }
+
+        foreach (var rootPath in database.GetRoots(RootKind.Incoming, MediaKind.Video))
+        {
+            rootListBox.Items.Add(new RootListItem(rootPath, RootKind.Incoming, MediaKind.Video));
         }
     }
 
@@ -601,11 +683,12 @@ public sealed class SettingsForm : Form
         }
     }
 
-    private void AddRoot(RootKind kind)
+    private void AddRoot(RootKind kind, MediaKind mediaKind)
     {
+        var mediaText = mediaKind == MediaKind.Video ? "영상" : "이미지";
         using var dialog = new FolderBrowserDialog
         {
-            Description = kind == RootKind.Incoming ? "신규등록 루트 폴더를 선택하세요" : "메인 라이브러리 루트 폴더를 선택하세요",
+            Description = kind == RootKind.Incoming ? $"{mediaText} 신규등록 루트 폴더를 선택하세요" : $"{mediaText} 메인 라이브러리 루트 폴더를 선택하세요",
             UseDescriptionForTitle = true
         };
 
@@ -614,7 +697,7 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        database.AddRoot(dialog.SelectedPath, kind);
+        database.AddRoot(dialog.SelectedPath, kind, mediaKind);
         LoadRoots();
         refreshMainWindow();
     }
@@ -639,7 +722,7 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        database.DeleteRoots(selectedRoots.Select(root => root.Path));
+        database.DeleteRoots(selectedRoots.Select(root => (root.Path, root.Kind, root.MediaKind)));
         LoadRoots();
         refreshMainWindow();
     }
@@ -1194,12 +1277,13 @@ public sealed class SettingsForm : Form
         return dialog.ShowDialog() == DialogResult.OK ? textBox.Text.Trim() : null;
     }
 
-    private sealed record RootListItem(string Path, RootKind Kind)
+    private sealed record RootListItem(string Path, RootKind Kind, MediaKind MediaKind)
     {
         public override string ToString()
         {
             var kindText = Kind == RootKind.Incoming ? "신규" : "메인";
-            return $"[{kindText}] {Path}";
+            var mediaText = MediaKind == MediaKind.Video ? "영상" : "이미지";
+            return $"[{mediaText}][{kindText}] {Path}";
         }
     }
 }

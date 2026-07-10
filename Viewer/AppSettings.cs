@@ -15,6 +15,7 @@ public sealed class AppSettings
     public bool ViewerFullscreen { get; set; }
     public bool ViewerAsyncImageLoading { get; set; } = true;
     public bool ViewerLoopPages { get; set; }
+    public string VideoPlayerPath { get; set; } = "";
     public bool AutoRefreshPathStatusAfterScan { get; set; }
     public int PartialDuplicateThresholdPercent { get; set; } = 80;
     public string LanguageCode { get; set; } = "kr";
