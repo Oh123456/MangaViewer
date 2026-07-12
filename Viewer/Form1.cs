@@ -84,6 +84,7 @@ public sealed class Form1 : Form
     private CancellationTokenSource? thumbnailLoadCancellationTokenSource;
 
     private readonly record struct FolderListViewport(long? TopFolderId, int TopIndex);
+    private readonly record struct FolderMoveResult(int MovedCount, bool IsCanceled, Exception? Exception);
 
     public Form1()
     {
@@ -663,7 +664,7 @@ public sealed class Form1 : Form
         copyPathButton.Click += (_, _) => CopySelectedFolderPath();
 
         moveToMainRootButton.Text = "메인으로 이동";
-        moveToMainRootButton.Click += (_, _) => MoveSelectedFolderToMainRoot();
+        moveToMainRootButton.Click += async (_, _) => await MoveSelectedFolderToMainRootAsync();
 
         deleteFolderButton.Text = "DB에서 제거";
         deleteFolderButton.Click += (_, _) => DeleteSelectedFolder();
@@ -716,7 +717,7 @@ public sealed class Form1 : Form
         folderListMenu.Items.Add("보류함 해제", null, (_, _) => SetSelectedFoldersReserved(false));
         folderListMenu.Items.Add(new ToolStripSeparator());
         moveSelectedToMainRootMenuItem.Text = "선택 항목 메인으로 이동";
-        moveSelectedToMainRootMenuItem.Click += (_, _) => MoveSelectedFoldersToMainRoot();
+        moveSelectedToMainRootMenuItem.Click += async (_, _) => await MoveSelectedFoldersToMainRootAsync();
         folderListMenu.Items.Add(moveSelectedToMainRootMenuItem);
         folderListMenu.Items.Add(new ToolStripSeparator());
         deleteSelectedFoldersMenuItem.Text = "선택 항목 DB에서 제거";
@@ -1858,17 +1859,17 @@ public sealed class Form1 : Form
         statusLabel.Text = "경로 복사됨";
     }
 
-    private void MoveSelectedFolderToMainRoot()
+    private async Task MoveSelectedFolderToMainRootAsync()
     {
         if (selectedFolder is null)
         {
             return;
         }
 
-        MoveFoldersToMainRoot([selectedFolder]);
+        await MoveFoldersToMainRootAsync([selectedFolder]);
     }
 
-    private void MoveSelectedFoldersToMainRoot()
+    private async Task MoveSelectedFoldersToMainRootAsync()
     {
         var selectedFolders = GetSelectedFolderItems();
         if (selectedFolders.Count == 0)
@@ -1882,10 +1883,10 @@ public sealed class Form1 : Form
             return;
         }
 
-        MoveFoldersToMainRoot(selectedFolders);
+        await MoveFoldersToMainRootAsync(selectedFolders);
     }
 
-    private void MoveFoldersToMainRoot(IReadOnlyList<FolderItem> targetFolders)
+    private async Task MoveFoldersToMainRootAsync(IReadOnlyList<FolderItem> targetFolders)
     {
         var movableFolders = targetFolders.Where(folder => Directory.Exists(folder.Path)).ToList();
         if (movableFolders.Count == 0)
@@ -1924,25 +1925,77 @@ public sealed class Form1 : Form
             return;
         }
 
-        var movedCount = 0;
+        using var cancellationTokenSource = new CancellationTokenSource();
+        using var progressForm = new ScanProgressForm(cancellationTokenSource.Cancel)
+        {
+            Text = "메인으로 이동"
+        };
+        IProgress<(int Completed, int Total, string Name)> progress = new Progress<(int Completed, int Total, string Name)>(moveProgress =>
+        {
+            var statusText = $"메인으로 이동 중... {moveProgress.Completed} / {moveProgress.Total}\n{moveProgress.Name}";
+            statusLabel.Text = statusText.Replace(Environment.NewLine, " ");
+            progressForm.UpdateStatus(statusText);
+        });
+
+        SetBusy(true);
+        SetDetailsEnabled(false);
         try
         {
-            foreach (var plan in movePlans)
+            progressForm.Show(this);
+            progressForm.UpdateStatus($"메인으로 이동 준비 중... 0 / {movePlans.Count}");
+            var moveResult = await Task.Run(() =>
             {
-                var oldPath = plan.Folder.Path;
-                Directory.Move(oldPath, plan.TargetPath);
-                database.UpdatePathPrefix(oldPath, plan.TargetPath);
-                movedCount++;
-            }
+                var movedCount = 0;
+                foreach (var plan in movePlans)
+                {
+                    if (cancellationTokenSource.IsCancellationRequested)
+                    {
+                        return new FolderMoveResult(movedCount, IsCanceled: true, Exception: null);
+                    }
 
-            statusLabel.Text = $"메인으로 이동됨: {movedCount}개";
+                    try
+                    {
+                        var oldPath = plan.Folder.Path;
+                        Directory.Move(oldPath, plan.TargetPath);
+                        database.UpdatePathPrefix(oldPath, plan.TargetPath);
+                        movedCount++;
+                        progress.Report((movedCount, movePlans.Count, plan.Folder.DisplayName));
+                    }
+                    catch (Exception exception)
+                    {
+                        return new FolderMoveResult(movedCount, IsCanceled: false, Exception: exception);
+                    }
+                }
+
+                return new FolderMoveResult(movedCount, IsCanceled: false, Exception: null);
+            });
+
             ClearDetails();
             LoadFolders(null, autoSelectFirst: false);
+
+            if (moveResult.IsCanceled)
+            {
+                statusLabel.Text = $"메인 이동 취소됨: {moveResult.MovedCount}개";
+                return;
+            }
+
+            if (moveResult.Exception is not null)
+            {
+                MessageBox.Show(this, $"{moveResult.MovedCount}개 이동 후 실패했습니다.\n\n{moveResult.Exception.Message}", "메인으로 이동 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            statusLabel.Text = $"메인으로 이동됨: {moveResult.MovedCount}개";
         }
         catch (Exception exception)
         {
-            MessageBox.Show(this, $"{movedCount}개 이동 후 실패했습니다.\n\n{exception.Message}", "메인으로 이동 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, exception.Message, "메인으로 이동 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
             LoadFolders(null, autoSelectFirst: false);
+        }
+        finally
+        {
+            progressForm.Close();
+            SetBusy(false);
         }
     }
 
